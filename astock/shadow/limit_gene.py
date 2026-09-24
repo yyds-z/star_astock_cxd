@@ -1,0 +1,367 @@
+# -*- coding: utf-8 -*-
+"""影子模块：涨停基因 + 缩量不破位（`ads_shadow_pick`）。
+
+------------------------------------------------------------------
+信号定义（已通过样本外检验，见 settings.yaml 的 shadow_gene 注释）
+------------------------------------------------------------------
+候选 = 同时满足：
+  · 涨停基因：过去 28 个自然日内有涨停（`zt20 ≥ 1`）
+  · 近期活跃：距上次涨停 ≤ 10 天
+  · 缩量    ：当日量 / 前 5 日均量 < 0.7
+  · 不破位  ：收盘 / 前 5 日均价 − 1 ≥ −0.02
+
+**这四个条件里，"回踩"是方向性错误**：实测把「不破位」换成「回踩破位」
+（vs_ma5 < −0.02）后，次日涨停率从 8.29% 掉到 3.58%、超额由 +0.668% 转为
+−0.249%（t=−2.94，显著为负）。所以缩量**整理**有效，缩量**回踩**无效。
+
+------------------------------------------------------------------
+buy/sell 口径（必须与检验一致，否则数字不可比）
+------------------------------------------------------------------
+  买入 = 信号日**收盘市价**（整理期，不涉及涨停排队 → 买得到）
+  卖出 = D+1 / D+3 / D+5 收盘（涨停价上有买盘队列 → 卖得出）
+这与主链路的「次日开盘买入」不同，**两者的成绩不可混用**。
+
+------------------------------------------------------------------
+结构性设计：build 与 settle 分离
+------------------------------------------------------------------
+`build` 只写信号、不写收益（此刻未来还没有发生）；`settle` 事后补收益。
+这样**前视在结构上就不可能发生**——不是靠"记得不要用未来数据"的纪律，
+而是 build 时刻根本拿不到未来数据。主链路曾因 `plan_date or data_date` 的兜底
+写过 12 条被污染的记录，那类问题在这里不可能出现。
+"""
+
+from __future__ import annotations
+
+from datetime import date as date_cls
+from datetime import datetime, timedelta
+
+import pandas as pd
+
+from astock.config import get_config
+from astock.logger import get_logger
+from astock.storage.db import Storage, get_storage
+
+logger = get_logger("shadow.limit_gene")
+
+# 取前 5 个交易日所需的自然日回溯（含长假也够）
+_LOOKBACK_CALENDAR_DAYS = 20
+
+
+class LimitGeneShadow:
+    """涨停基因影子模块。"""
+
+    def __init__(self, storage: Storage | None = None) -> None:
+        self.cfg = get_config()
+        self.storage = storage or get_storage()
+        s = self.cfg.section("shadow_gene")
+        self.enabled = bool(s.get("enabled", True))
+        self.zt_window = int(s.get("zt_window_days", 28))
+        self.recent_days = int(s.get("recent_days", 10))
+        self.vol_max = float(s.get("vol_ratio_max", 0.7))
+        self.ma5_min = float(s.get("vs_ma5_min", -0.02))
+        self.max_picks = int(s.get("max_picks", 60))
+
+    @property
+    def _params(self) -> str:
+        return (f"zt{self.zt_window}/recent{self.recent_days}"
+                f"/vol<{self.vol_max}/ma5>={self.ma5_min}")
+
+    # ---------------- 信号 ----------------
+    def build(self, trade_date: date_cls | None = None, source: str = "daily") -> pd.DataFrame:
+        """生成信号并落库（**不含收益**）。返回写入的候选。
+
+        source="daily"    ：用日线收盘价/全日量（盘后可用，也能回填历史）
+        source="snapshot" ：用盘中快照（14:00 决策用）。此时"缩量"用数据源的
+                            **量比**代替 —— 量比 = 当日累计量 / (过去 5 日每分钟
+                            均量 × 已开盘分钟数)，等价于「按当前节奏外推的全日
+                            量与过去 5 日全日均量之比」，即与日线口径同量纲。
+                            偏差在于 A 股成交呈 U 形（开盘/收盘重），14:00 时
+                            量比会略微低估全日比例。
+        """
+        if not self.enabled:
+            logger.info("影子模块未启用，跳过")
+            return pd.DataFrame()
+
+        trade_date = trade_date or self._latest_date()
+        if trade_date is None:
+            logger.warning("日线表为空，无法生成影子信号")
+            return pd.DataFrame()
+
+        df = (self._query_snapshot(trade_date) if source == "snapshot"
+              else self._query_daily(trade_date))
+        if df.empty:
+            logger.info("影子信号：%s 无候选（source=%s）", trade_date, source)
+            return df
+
+        if len(df) > self.max_picks:
+            df = df.sort_values("vol_ratio").head(self.max_picks).reset_index(drop=True)
+            logger.warning("影子候选超过上限，按缩量程度截取前 %d 只", self.max_picks)
+
+        out = pd.DataFrame({
+            "date": trade_date,
+            "code": df["code"].astype(str),
+            "name": df["name"],
+            "close": df["close"].astype(float),
+            "zt20": df["zt20"].astype(int),
+            "days_since_zt": df["days_since_zt"].astype(int),
+            "vol_ratio": df["vol_ratio"].astype(float),
+            "vs_ma5": df["vs_ma5"].astype(float),
+            # 参考分：越缩量越高。仅用于展示排序，**不参与选股**
+            # （截断只按 vol_ratio，避免引入未经检验的权重）
+            "signal_score": (1.0 - df["vol_ratio"].astype(float)).clip(lower=0) * 100,
+            "params": self._params,
+            "created_at": datetime.now(),
+        })
+        n = self.storage.upsert_df(out, "ads_shadow_pick")
+        logger.info("影子信号已落库：%s 共 %d 只（source=%s）", trade_date, n, source)
+        return out
+
+    # ---------------- 结算 ----------------
+    def settle(self) -> int:
+        """为尚未结算完整的信号补上 D+1/D+3/D+5 收益与基准。返回更新行数。
+
+        判据是 `ret1 IS NULL OR ret5 IS NULL`，而不是只看 `ret1`：
+        信号日当天只能拿到 D+1 收益（更远的还没发生）。若只判 `ret1`，
+        当天结算一次后该行就再也不会被写入，`ret3`/`ret5` 会**永久留空**，
+        而"持 3 日/5 日"恰恰是我们最关心的口径。
+        重复结算同一行是安全的：收益由行情重算，值不变。
+        """
+        pending = self.storage.query_df(
+            "SELECT date, code FROM ads_shadow_pick WHERE ret1 IS NULL OR ret5 IS NULL"
+        )
+        if pending.empty:
+            return 0
+
+        fwd = self._forward_returns()
+        if fwd.empty:
+            return 0
+
+        merged = pending.merge(fwd, on=["date", "code"], how="inner")
+        merged = merged[merged["c1"].notna()]
+        if merged.empty:
+            return 0
+
+        # 基准：同期全池等权 D+1 收益（同一股票池、同口径）
+        bench = fwd.groupby("date", as_index=False).agg(benchmark=("ret1", "mean"))
+        # 是否命中涨停：看该股在**下一个交易日**是否在涨停池里
+        hit = self.storage.query_df("SELECT DISTINCT code, date FROM dwd_limit_up")
+        hit = hit.rename(columns={"date": "next_date"})
+        hit["is_zt"] = True
+
+        merged = merged.merge(bench, on="date", how="left")
+        merged = merged.merge(hit, on=["code", "next_date"], how="left")
+
+        upd = pd.DataFrame({
+            "date": merged["date"],
+            "code": merged["code"],
+            "next_date": merged["next_date"],
+            "ret1": merged["ret1"],
+            "ret3": merged["ret3"],
+            "ret5": merged["ret5"],
+            "hit_limit_up": merged["is_zt"].fillna(False).astype(bool),
+            "benchmark": merged["benchmark"],
+            "excess": merged["ret1"] - merged["benchmark"],
+        })
+        # 只更新结算列：先取回全行再合并，避免 upsert 整行覆盖丢掉信号字段
+        full = self.storage.query_df("SELECT * FROM ads_shadow_pick")
+        full = full.drop(columns=[c for c in
+                                  ["next_date", "ret1", "ret3", "ret5",
+                                   "hit_limit_up", "benchmark", "excess"]
+                                  if c in full.columns])
+        out = full.merge(upd, on=["date", "code"], how="inner")
+        n = self.storage.upsert_df(out, "ads_shadow_pick")
+        logger.info("影子信号结算完成：%d 行", n)
+        return n
+
+    # ---------------- 回填 ----------------
+    def trading_days(self, start: date_cls | None = None,
+                     end: date_cls | None = None) -> list[date_cls]:
+        sql = "SELECT DISTINCT date FROM dwd_daily_bar WHERE open > 0 AND close > 0"
+        params: list = []
+        if start is not None:
+            sql += " AND date >= ?"
+            params.append(start)
+        if end is not None:
+            sql += " AND date <= ?"
+            params.append(end)
+        sql += " ORDER BY date"
+        return self.storage.query_df(sql, params)["date"].tolist()
+
+    def backfill(self, start: date_cls | None = None, end: date_cls | None = None,
+                 progress=None) -> int:
+        """逐日生成历史信号（**不含收益**）。
+
+        为什么要能回填：检验结论（240 天 / 9186 笔）是在临时脚本里算的。
+        把它固化成可复现的命令，才能随时用同一口径重算 —— 否则"结论"只存在于
+        一次性脚本的输出里，无法随数据更新而复核。
+        注意：`dwd_limit_up` 只覆盖 2025-09-23 起，早于此日期"涨停基因"恒不可见。
+        """
+        days = self.trading_days(start, end)
+        total = 0
+        for i, d in enumerate(days, 1):
+            total += len(self.build(d, source="daily"))
+            if progress is not None and i % 20 == 0:
+                progress(i, len(days), total)
+        return total
+
+    # ---------------- 统计 ----------------
+    def report(self, days: int = 60) -> str:
+        """影子运行摘要：命中率、可实现收益、超额与显著性。"""
+        df = self.storage.query_df(
+            f"SELECT * FROM ads_shadow_pick WHERE ret1 IS NOT NULL "
+            f"ORDER BY date DESC LIMIT {int(days) * self.max_picks}"
+        )
+        if df.empty:
+            return "影子模块：暂无已结算样本。"
+
+        daily = df.groupby("date", as_index=False).agg(ex=("excess", "mean"))
+        t = 0.0
+        if len(daily) > 2:
+            sd = daily["ex"].std(ddof=1)
+            t = float(daily["ex"].mean() / (sd / len(daily) ** 0.5)) if sd else 0.0
+
+        lines = [
+            f"影子模块（涨停基因+缩量不破位）　参数 {self._params}",
+            f"  样本 {len(df)} 笔 / {df['date'].nunique()} 个交易日",
+            f"  次日涨停率 {100.0 * df['hit_limit_up'].fillna(False).mean():.2f}%"
+            f"（全市场约 2.05% → 提升 {100.0 * df['hit_limit_up'].fillna(False).mean() / 2.05:.1f} 倍）",
+            f"  可实现收益：次日 {df['ret1'].mean():+.3f}%　"
+            f"3日 {df['ret3'].mean():+.3f}%　5日 {df['ret5'].mean():+.3f}%",
+            f"  日均超额 {daily['ex'].mean():+.3f}%　t = {t:+.2f}"
+            f"{'（显著）' if abs(t) >= 2 else '（不显著）'}",
+        ]
+        # 与检验结论一致的提醒：收益集中在尾部
+        tail = df[df["hit_limit_up"].fillna(False)]
+        rest = df[~df["hit_limit_up"].fillna(False)]
+        if not rest.empty:
+            lines.append(
+                f"  ⚠ 收益来源：命中涨停 {len(tail)} 笔均值 {tail['ret1'].mean():+.2f}%，"
+                f"其余 {len(rest)} 笔均值 {rest['ret1'].mean():+.2f}%"
+                f"（剔除命中后超额 {rest['excess'].mean():+.3f}%）"
+            )
+        return "\n".join(lines)
+
+    # ---------------- 内部 ----------------
+    def _latest_date(self) -> date_cls | None:
+        v = self.storage.query_value(
+            "SELECT MAX(date) FROM dwd_intraday_snapshot"
+        )
+        if v is not None:
+            return v.date() if hasattr(v, "date") else v
+        v = self.storage.query_value("SELECT MAX(date) FROM dwd_daily_bar")
+        if v is None:
+            return None
+        return v.date() if hasattr(v, "date") else v
+
+    def _gene_cte(self, target: date_cls, lower: date_cls) -> tuple[str, list]:
+        """涨停基因 CTE + 参数（供 daily / snapshot 两种模式复用）。"""
+        sql = """
+        gene AS (
+            SELECT b.code, COUNT(l.date) AS zt20,
+                   DATE_DIFF('day', MAX(l.date), b.date) AS days_since_zt
+            FROM (SELECT DISTINCT code, date FROM dwd_daily_bar WHERE date = ?) b
+            LEFT JOIN dwd_limit_up l
+                   ON l.code = b.code AND l.date < b.date AND l.date >= ?
+            GROUP BY b.code, b.date
+        )"""
+        return sql, [target, lower]
+
+    def _query_daily(self, target: date_cls) -> pd.DataFrame:
+        lower = target - timedelta(days=self.zt_window)
+        gene_sql, gene_params = self._gene_cte(target, lower)
+        win_lower = target - timedelta(days=60)
+        sql = f"""
+        WITH recent AS (
+            SELECT code, date, close,
+                   volume / NULLIF(AVG(volume) OVER (PARTITION BY code ORDER BY date
+                       ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING), 0) AS vol_ratio,
+                   close / NULLIF(AVG(close) OVER (PARTITION BY code ORDER BY date
+                       ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING), 0) - 1 AS vs_ma5
+            FROM dwd_daily_bar
+            WHERE open > 0 AND close > 0 AND volume > 0 AND date >= ? AND date <= ?
+        ),
+        {gene_sql}
+        SELECT r.code, s.name, r.close, r.vol_ratio, r.vs_ma5,
+               g.zt20, g.days_since_zt
+        FROM recent r
+        JOIN gene g ON g.code = r.code
+        JOIN dim_stock s ON s.code = r.code
+        WHERE r.date = ?
+          AND s.board IN ('main', 'gem')
+          AND COALESCE(s.is_st, FALSE) = FALSE
+          AND (s.out_date IS NULL OR s.out_date > r.date)
+          AND DATE_DIFF('day', s.ipo_date, r.date) >= 120
+          AND g.zt20 >= 1
+          AND g.days_since_zt <= ?
+          AND r.vol_ratio < ?
+          AND r.vs_ma5 >= ?
+        ORDER BY r.vol_ratio
+        """
+        params = [win_lower, target, *gene_params, target,
+                  self.recent_days, self.vol_max, self.ma5_min]
+        return self.storage.query_df(sql, params)
+
+    def _query_snapshot(self, target: date_cls) -> pd.DataFrame:
+        """用当日快照 + 前 5 日收盘均线。缩量用源提供的**量比**代替。"""
+        lower = target - timedelta(days=self.zt_window)
+        gene_sql, gene_params = self._gene_cte(target, lower)
+        prev = self.storage.query_df(
+            "SELECT DISTINCT date FROM dwd_daily_bar WHERE date < ? "
+            "ORDER BY date DESC LIMIT 5",
+            [target],
+        )
+        days = [d for d in prev["date"].tolist()] if not prev.empty else []
+        if len(days) < 5:
+            logger.warning("历史不足 5 个交易日，无法计算均线（snapshot 模式）")
+            return pd.DataFrame()
+        marks = ", ".join("?" for _ in days)
+        sql = f"""
+        WITH ma AS (
+            SELECT code, AVG(close) AS ma5, AVG(volume) AS avg_vol
+            FROM dwd_daily_bar
+            WHERE date IN ({marks}) AND close > 0 AND volume > 0
+            GROUP BY code
+        ),
+        {gene_sql}
+        SELECT k.code, s.name, k.price AS close, k.volume_ratio AS vol_ratio,
+               k.price / NULLIF(m.ma5, 0) - 1 AS vs_ma5,
+               g.zt20, g.days_since_zt
+        FROM dwd_intraday_snapshot k
+        JOIN ma m ON m.code = k.code
+        JOIN gene g ON g.code = k.code
+        JOIN dim_stock s ON s.code = k.code
+        WHERE k.date = ?
+          AND s.board IN ('main', 'gem')
+          AND COALESCE(s.is_st, FALSE) = FALSE
+          AND (s.out_date IS NULL OR s.out_date > k.date)
+          AND DATE_DIFF('day', s.ipo_date, k.date) >= 120
+          AND g.zt20 >= 1
+          AND g.days_since_zt <= ?
+          AND k.volume_ratio IS NOT NULL
+          AND k.volume_ratio < ?
+          AND k.price / NULLIF(m.ma5, 0) - 1 >= ?
+        ORDER BY k.volume_ratio
+        """
+        params = [*days, *gene_params, target,
+                  self.recent_days, self.vol_max, self.ma5_min]
+        return self.storage.query_df(sql, params)
+
+    def _forward_returns(self) -> pd.DataFrame:
+        """每行自身为买入日的前瞻收益（窗口建在**全量**日线上，再 join 候选）。"""
+        return self.storage.query_df("""
+        WITH fwd AS (
+            SELECT b.code, b.date, b.close,
+                   LEAD(b.close, 1) OVER w AS c1,
+                   LEAD(b.close, 3) OVER w AS c3,
+                   LEAD(b.close, 5) OVER w AS c5,
+                   LEAD(b.date, 1)  OVER w AS nd
+            FROM dwd_daily_bar b
+            WHERE b.open > 0 AND b.close > 0 AND b.volume > 0
+            WINDOW w AS (PARTITION BY b.code ORDER BY b.date)
+        )
+        SELECT code, date, nd AS next_date, c1,
+               (c1 / NULLIF(close, 0) - 1) * 100 AS ret1,
+               (c3 / NULLIF(close, 0) - 1) * 100 AS ret3,
+               (c5 / NULLIF(close, 0) - 1) * 100 AS ret5
+        FROM fwd
+        """)

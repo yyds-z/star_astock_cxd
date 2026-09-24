@@ -1,0 +1,321 @@
+# ============================================================
+#  数据台账（Data Registry）—— 采集模块的准入与复核规范
+# ============================================================
+#
+# 为什么需要它：
+# 数据采集最危险的模式不是"采不到"，而是"采了一堆但不知道有没有用"。
+# 每多一份数据就多一份噪声、一份维护成本、一份出错面；
+# 而判断有用与否**必须有统计证据**，不能靠"感觉这个指标挺重要"。
+#
+# 因此规定：**任何数据源在采集前必须先在台账登记**，并回答三个问题 ——
+#   1. 用途：它进入决策链的哪一环？（不明确就只能是 display）
+#   2. 验证：用什么统计方法证明它有效？（写不出方法就不许进评分）
+#   3. 成本：一次性采集与日常维护各要多久？
+#
+# purpose（用途定位，决定它能影响什么）：
+#   core     基础数据，缺了系统不存在（日线、股票列表、交易日历）
+#   score    参与选股评分 —— **只有 status=validated 才允许**
+#   regime   参与市场状态判定
+#   filter   参与风险过滤（剔除某些票）
+#   decision 辅助人工决策，不自动执行（如竞价）
+#   display  仅展示，不参与任何计算
+#   derived  由上游数据算出，可随时重建
+#
+# status（有效性状态）：
+#   core        基础数据，需检验的是"完整性"而非"有效性"
+#   validated   已有统计证据支持，可用于决策
+#   pending     已采集但**未通过有效性检验** —— 只允许展示，禁止进评分
+#   display     定位就是展示/辅助，不追求统计有效性
+#   deprecated  已判定无用途，应停止采集
+#
+# verify（复核方法）：必须是可执行的命令或明确的统计判据，
+# 不接受"看起来有用"这类描述。
+#
+# 复核节奏：每次回测后跑 `python scripts\data_audit.py`，
+# 它会核对台账与实际库/代码的一致性，并列出"欠验证债"。
+
+datasets:
+  # ---------------- 基础层 ----------------
+  - table: trade_calendar
+    name: 交易日历
+    purpose: core
+    status: core
+    source: 交易所日历
+    cost: 一次性同步，日常自动增量
+    evidence: 无它则无法判断"数据是否滞后"、无法对齐 T+1 复盘
+    verify: 校验 is_open 与实际上游一致（覆盖率 4383 天）
+
+  - table: dim_stock
+    name: 股票列表（含 ST/板块/退市日）
+    purpose: core
+    status: core
+    source: baostock/akshare
+    cost: 一次性
+    evidence: 涨跌停幅度判定、退市过滤、股票池均依赖它
+    verify: 覆盖率校验 + 与实盘股票数对比
+
+  - table: dwd_daily_bar
+    name: 个股日线
+    purpose: core
+    status: core
+    source: >
+      免费源（baostock → akshare → adata 自动降级，提供前复权价 + 准确换手率）为主；
+      同花顺全市场导出（未复权）为**自动兜底**
+    cost: 全市场回填约 2 小时（已完成）；日常增量：免费源 10~26 分钟（逐只请求），同花顺导出 **1 秒**
+    evidence: 所有策略、所有因子的唯一输入基础
+    verify: 覆盖率 94.7%（未覆盖的 91% 为已退市股，属正常）
+    note: >
+      **双通道设计**（2026-09-23 定，起因：免费源当天两次不可用导致选股被阻塞）：
+      ① 免费源可用时**优先用它** —— 它提供前复权价格与准确换手率；
+      ② 免费源未发布/不可达时**自动切换同花顺全市场导出**（命令 `dump-daily`）——
+         1 次请求 + 1 次下载拿全市场，实测 16:2x 即含当日数据（免费源要到 17:30 前后）。
+      导出为未复权，因此有两条硬约束：
+        · **只补库里缺失的日期，绝不覆盖已有数据** —— 否则除权日会出现复权断层；
+        · 换手率由流通市值反推流通股本计算，属近似值，用 `adjust='dump'` 标记以便追溯。
+      实测口径一致性：与库内前复权价对比 5199 只，**100% 完全一致**（最大差 0.00%）。
+
+  - table: dwd_index_bar
+    name: 指数日线
+    purpose: regime
+    status: core
+    source: akshare
+    cost: 秒级
+    evidence: 市场状态识别（指数 20 日动量）必需
+    verify: 与公开行情抽查比对
+
+  # ---------------- 派生层（可重建，无需单独验证有效性）----------------
+  - table: dws_feature
+    name: 因子宽表
+    purpose: derived
+    status: core
+    source: 由 dwd_daily_bar 库内计算
+    cost: 全量约 1 分钟
+    evidence: 策略的指标来源；口径与 Sequoia-X 对齐
+    verify: 与策略内联计算结果抽样比对
+
+  - table: dws_market_regime
+    name: 市场状态
+    purpose: derived
+    status: validated
+    source: 由因子表 + 指数 + 板块强度算出
+    cost: 秒级
+    evidence: 「状态 × 档位」交叉表显示短线档在 5 种状态下均最优，
+      据此校准的 tier_weights 已替换凭直觉写的旧权重
+    verify: python scripts\regime_matrix.py（需先跑回测）
+    note: >
+      **口径说明**：市场状态用**全市场**（含科创板）计算，而选股池已排除
+      科创板/北交所（universe.boards = main + gem）。
+      这是刻意为之：状态衡量的是整个市场的情绪环境，且 euphoria 等阈值
+      （涨停 ≥ 80）是按全市场口径校准的 —— 若改用可交易子集计算，
+      阈值需重新校准，否则会系统性误判。选股池的收窄不影响状态判定。
+
+  - table: dws_limit_factor
+    name: 涨停因子宽表
+    purpose: derived
+    status: validated
+    source: 由涨停池 + 日线 + 板块强度算出
+    cost: 秒级
+    evidence: 4 个因子通过 Bonferroni 校正且样本稳定
+      （详见下面 dwd_limit_up 条目）
+    verify: python scripts\factor_ic.py
+
+  # ---------------- 决策输入层 ----------------
+  - table: dwd_limit_up
+    name: 涨停池（含连板/封单/题材）
+    purpose: regime
+    status: validated
+    source: 同花顺 Financial-API
+    cost: 回填 1 年约 35 分钟；日常 2 次请求/天
+    evidence: >
+      python scripts\factor_ic.py 结论（242 个交易日 / 1.87 万条）：
+      封单额占比 IC -0.085 (t=-8.40)、换手率 +0.045 (t=+4.46)、
+      封单额 -0.038 (t=-3.91)、首次涨停时间 +0.037 (t=+3.51)，
+      四者均通过 Bonferroni 校正（阈值 2.77）且对半切分方向稳定。
+      核心结论：强封板 → 次日高开越多 → 以开盘价买入越亏（全体 -0.22%/胜率 43.5%）。
+      市场级：涨停家数 vs 次日指数 IC -0.098。
+    verify: python scripts\factor_ic.py
+    note: >
+      有效性已证实，但**适用场景受限**：结论针对"打板（次日开盘买入）"，
+      而现有策略绝大多数不买当日涨停股（实测当日涨停候选仅占 4.52%）。
+      2026-09-23 的落地方式（不直接进评分的理由已修正）：
+        ① 市场状态：涨停家数/炸板率已进 dws_market_regime；
+        ② **入场成本过滤**（astock/features/entry_cost.py）——
+           只对「当日涨停的候选」按封板强度估算次日开盘溢价，
+           超过 3% 即剔除。实测候选股整体是系统性**低开**（跳空均值 -1.20%），
+           因此对非涨停候选做成本惩罚是错的；只有当日涨停股必然高开。
+        ③ 未进评分器：现有策略不买当日涨停股，直接搬因子属错误迁移，
+           需先做策略级 A/B。
+
+  - table: dwd_limit_break
+    name: 炸板池
+    purpose: regime
+    status: validated
+    source: 同花顺 Financial-API
+    cost: 与涨停池同批，无额外请求
+    evidence: 炸板率是「情绪退潮」状态的判定条件之一；实测炸板率与次日指数 IC -0.043
+    verify: python scripts\factor_ic.py（第五节 市场级因子）
+
+  - table: dws_sector_strength
+    name: 板块强度（本地自算）
+    purpose: regime
+    status: pending
+    source: 由日线 + 行业映射自算
+    cost: 全量约 1 分钟
+    evidence: >
+      个股层面 IC +0.024 (t=+2.16) —— **未通过 Bonferroni 校正（2.77）**，
+      即"仅未校正显著"，按规范不得进评分。
+      但它是「事件驱动」状态的唯一触发条件（实测激活 47 个交易日）。
+      该状态是否有正贡献尚未验证。
+    verify: >
+      待办：按状态分组比较「事件驱动」日的推荐表现 vs 其它状态日；
+      若无显著差异，应把事件驱动并入 unknown，并停止维护板块数据。
+    exception: false
+    note: >
+      **2026-09-24 P1 处置：规范例外已消除。**
+      此前它是"唯一规范例外"——status=pending 却通过 event 状态影响决策
+      （2026-09-23 复核：event 542 笔差异 -0.362%，t=-1.49 不显著；
+      另一套口径下 -0.88%，换口径即翻转 ⇒ 结论不稳健，当时的处置是降权观察）。
+      现在按准入规则「未验证项不得影响决策」**关闭 event 触发**
+      （`market_regime.event.enabled: false`），理由补强：
+      style_matrix 已证明状态×规则绑定整体无正向依据（42 格 0 显著更好），
+      event 是其中样本最少、证据最弱的状态。
+      top_sector 仍照常计算（仅供展示）。验证通过后可重新打开。
+      处理期限：板块集中度通过 verify 后重算 dws_market_regime 并恢复 event。
+
+  - table: dwd_dragon_tiger
+    name: 龙虎榜（机构/游资净买入）
+    purpose: display
+    status: display
+    source: 同花顺 Financial-API
+    cost: 回填 1 年约 17 分钟；日常 1 次请求/天
+    evidence: >
+      python scripts\dragon_ic.py 结论（242 个交易日 / 11,436 条当日榜）：
+      唯一接近有效的因子是「净买入占比」IC -0.028 (t=-2.62)，
+      但仅比 Bonferroni 阈值 2.58 高 0.04 —— 属**擦线通过**
+      （阈值只要有微小变动结论就翻转），不足以支撑「改评分」这种有成本的决策。
+      上榜股本身：次日开盘溢价 -0.62%（低开）、买入后 +0.57%、胜率 48.0%、
+      T+3 -0.24% —— 无显著交易价值。
+      机构参与与否的差异仅 +0.02%，无区分度。
+    verify: python scripts\dragon_ic.py
+    note: >
+      ① 字段缺失：amount / org_buy_num / org_sell_num 上游**实测从未返回**
+      （填充率 0%），接口文档虽列出但响应为空，故「机构买入家数」不可用，
+      机构参与只能用 org_net_value 是否非空判定。
+      ② 处理：保留采集（成本极低，1 次请求/天）用于人工风险提示；
+      若一年后样本翻倍仍不显著，应改 deprecated 并停止采集。
+
+  - table: dws_finance_metrics
+    name: 财务报表与指标（多期）
+    purpose: pending
+    status: pending
+    source: 同花顺 Financial-API
+    cost: 全市场回填约 17 小时（每只 3 次请求）
+    evidence: >
+      尚未验证。定位是解决价值档"只有技术面、没有基本面"的问题
+      （价值档实测在全部市场状态里都是最弱档）。
+      已具备避免前视偏差的 report_date，但这只保证"不错"，不证明"有用"。
+    verify: >
+      待办：① 全市场回填；② 检验 ROE / 资产负债率 / 营收同比 / 净利同比
+      与次日及 20 日收益的 IC；③ 在全市场财务到位前，**不做全市场回填**，
+      只采候选股（约 1 分钟/天）用于报告展示。
+    note: 采集成本最高的一份数据，必须先验证再全量回填 —— 否则 17 小时换一个可能的噪声。
+
+  - table: dwd_auction
+    name: 集合竞价
+    purpose: decision
+    status: display
+    source: 同花顺 Financial-API
+    cost: 1 次请求/天（仅候选股）
+    evidence: 不追求统计有效性：它的用途是盘前人工决策（开盘价即买入成本）
+    verify: 人工核对每日竞价值与行情软件一致
+
+  - table: dim_stock_industry
+    name: 个股 → 行业映射
+    purpose: regime
+    status: pending
+    source: 申万 / 新浪
+    cost: 一次性
+    evidence: 覆盖率 91.5%，支撑板块强度；有效性随板块强度一并待验证
+    verify: 同 dws_sector_strength
+
+  - table: dim_industry
+    name: 行业维度表
+    purpose: derived
+    status: core
+    source: 由个股映射汇总
+    cost: 秒级
+    evidence: 行业名称与层级的字典
+
+  - table: dwd_intraday_snapshot
+    name: 盘中快照（14:00 截面）
+    purpose: decision
+    status: pending
+    source: akshare 实时快照 stock_zh_a_spot_em
+    cost: 1 次请求/天
+    evidence: >
+      **尚无任何验证，也不可能"补"出来**：免费源不提供历史盘中截面，
+      所以它从 2026-09-24 才开始积累。在此之前的任何"盘中回测"都不可信。
+    verify: >
+      待办：积累 3~6 个月后，与日线口径对比 —— 重点检验同一信号在
+      14:00 决断（用**量比**代替全日量比）与盘后决断（用全日成交量）的差异。
+    note: >
+      ⚠️ **唯一有时效性的数据**：晚一天开始记录，就永远少一天可回测样本。
+      采集任务 AStockAI_Snapshot（每交易日 14:00），**独立于** 18:30 的 daily ——
+      daily 有 data_ready_time=16:00 守卫，14:00 运行会被回退到上一交易日，
+      产出的只是「昨天的数据日 + 今天的（已错过开盘的）计划日」。
+      偏差来源：A 股成交呈 U 形（开盘/收盘重），14:00 用量比会略微低估全日缩量程度。
+
+  - table: ads_shadow_pick
+    name: 影子模块候选（涨停基因 + 缩量不破位）
+    purpose: decision
+    status: pending
+    source: 由 dwd_daily_bar + dwd_limit_up 自算
+    cost: 秒级（历史回填 241 天约 27 秒）
+    evidence: >
+      2025-09-24 ~ 2026-09-22（240 个交易日 / 9187 笔；`astock.cli shadow status`）：
+        次日涨停率 9.20%（全市场 2.05% → **4.5 倍**）
+        可实现收益：次日 +0.559% / 3日 +0.892% / 5日 +0.708%
+        日度聚类超额 +0.667%（t=5.62）
+        **观察期选参 → 验证期 +0.697%（t=3.56）**，6 个市场状态全部为正
+      这是本项目第一个通过**真正样本外**（观察期定参、验证期检验）的信号。
+      ⚠️ 但收益 100% 来自尾部：剔除命中涨停的 845 笔后，其余 8342 笔超额 **−0.373%**。
+      它是"彩票型"结构，靠每日 30~40 只的分散化才成为正期望。
+    verify: python -m astock.cli shadow status（重算历史用 shadow backfill）
+    note: >
+      **独立于主评分体系**，不参与选股。原因：主链路的评价指标
+      `ret1 = 买入日 close/open − 1` 在 A 股 T+1 下不可实现
+      （实测可实现口径超额归零、D+5 显著为负 −0.605pp，t=−3.28）。
+      两边混在一起会导致都无法归因。
+      ⚠️ 样本只有 1 年（dwd_limit_up 仅覆盖 2025-09-23 起）→ **无跨周期检验**；
+      年化 +89%（扣成本后）不可信，更可能是样本期特性，**切不可据此加大仓位**。
+      ⚠️ 方向性陷阱：把「不破位」改成「回踩破位」（vs_ma5 < −0.02）后，次日涨停率
+      掉到 3.58%、超额转为 −0.249%（t=−2.94，显著为负）。
+      即缩量**整理**有效，缩量**回踩**无效 —— 不要改成回踩型。
+
+  # ---------------- 已判定无用途 ----------------
+  - table: dim_stock_finance
+    name: 基本面快照（申万接口附带）
+    purpose: display
+    status: deprecated
+    source: 申万成分接口附带返回
+    cost: 随行业同步附带，无额外请求
+    evidence: >
+      **只写不读**：全代码库中仅有 sectors.py 的写入点，
+      没有任何读取点（data_audit.py 会自动检出这类"死数据"）。
+      且为无历史时点的快照，无法用于回测。
+    verify: 已被 dws_finance_metrics（多期 + 披露日）取代
+    note: 建议停止写入该表；保留历史数据不影响，但不再作为任何决策依据。
+
+  # ---------------- 明确不采集 ----------------
+  - table: （未采集）新闻/舆情
+    name: 新闻与舆情文本
+    purpose: display
+    status: pending
+    source: 暂无
+    cost: 未知（免费源质量不稳定，且需 LLM 处理，token 成本高）
+    evidence: 未采集、未验证
+    verify: >
+      暂不采集。理由：① 免费源新闻质量与时效性差；
+      ② 需 LLM 抽取结构化标签，成本是候选股报告的数十倍；
+      ③ 验证周期长（需积累足够样本才能做有效性检验）。
+      按规范，**在能写出可执行的验证方法之前不采集**。

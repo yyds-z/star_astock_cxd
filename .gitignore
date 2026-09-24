@@ -1,0 +1,37 @@
+# ---------------- 密钥 ----------------
+# .env 内含 DeepSeek API Key，绝对不要提交到版本库
+.env
+.env.local
+*.key
+
+# ---------------- 数据资产 ----------------
+# 主库、快照、报告、回测明细、日志：体积大（实测 data/ 约 4.6 GB），
+# 且是本机长期积累的资产，用 scripts\backup_data.bat 做本地备份，不通过 git 同步。
+# 数据如何从零复现见 config\DATA_SOURCES.md。
+data/
+logs/
+# 兜底：任何位置的大数据文件都不入库（GitHub 单文件硬限制 100MB）
+*.duckdb
+*.duckdb.wal
+*.parquet
+
+# ---------------- 派生输出（每日运行自动重建，纳入版本管理只会产生无意义变更）----------------
+# skills/ 是 `python -m astock.cli skills` 从 config 策略定义生成的副本
+skills/
+*.log
+
+# ---------------- Python ----------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------------- 编辑器 / 系统 ----------------
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

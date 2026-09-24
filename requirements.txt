@@ -1,0 +1,25 @@
+# ===== 核心 =====
+duckdb>=1.1.0
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=14.0.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+pydantic-settings>=2.0.0
+
+# ===== 数据源 =====
+baostock>=0.8.8          # 主数据源：全市场日K / 指数 / 交易日历
+adata>=2.9.0             # 补充源：资金流向 / 概念板块 / 财务
+akshare>=1.12.0          # 兜底源
+
+# ===== Web / API =====
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+
+# ===== AI =====
+openai>=1.30.0           # DeepSeek 使用 OpenAI 兼容协议
+
+# ===== 工具 =====
+requests>=2.31.0
+tenacity>=8.2.0
+tqdm>=4.66.0

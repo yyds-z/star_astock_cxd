@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>A股 AI 智能选股系统</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel-2:#1c2230; --line:#242c3a;
+    --text:#e6edf3; --muted:#8b949e; --up:#f85149; --down:#3fb950;
+    --accent:#58a6ff; --warn:#d29922; --chip:#21262d;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size:14px;}
+  a{color:var(--accent);text-decoration:none;}
+  .wrap{max-width:1440px;margin:0 auto;padding:18px 20px 60px;}
+
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:6px 0 16px;}
+  header h1{font-size:19px;margin:0;font-weight:600;}
+  .badge{padding:3px 10px;border-radius:20px;font-size:12px;background:var(--chip);border:1px solid var(--line);}
+  .badge.state{background:#1f6feb22;border-color:#1f6feb66;color:#79c0ff;}
+  .spacer{flex:1;}
+  button{background:var(--panel-2);color:var(--text);border:1px solid var(--line);
+         border-radius:6px;padding:6px 13px;cursor:pointer;font-size:13px;}
+  button:hover{border-color:var(--accent);color:var(--accent);}
+
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:12px;margin-bottom:16px;}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:13px 15px;}
+  .card .k{color:var(--muted);font-size:12px;margin-bottom:7px;}
+  .card .v{font-size:21px;font-weight:600;letter-spacing:.4px;}
+  .card .v small{font-size:12px;color:var(--muted);font-weight:400;margin-left:3px;}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;}
+  @media(max-width:1000px){.grid2{grid-template-columns:1fr;}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:14px 16px;}
+  .panel h2{font-size:14px;margin:0 0 12px;font-weight:600;color:var(--text);}
+  .chart{height:260px;width:100%;}
+
+  .tabs{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;}
+  .tab{padding:6px 15px;border-radius:6px;background:var(--chip);border:1px solid var(--line);
+       cursor:pointer;font-size:13px;color:var(--muted);}
+  .tab.active{background:#1f6feb22;border-color:#1f6feb66;color:#79c0ff;}
+
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;}
+  th{color:var(--muted);font-weight:500;font-size:12px;background:var(--panel-2);}
+  tbody tr{cursor:pointer;}
+  tbody tr:hover{background:#1f6feb14;}
+  .num{text-align:right;font-variant-numeric:tabular-nums;}
+  .up{color:var(--up);} .down{color:var(--down);} .muted{color:var(--muted);}
+  .score{font-weight:600;color:#79c0ff;}
+
+  .detail{margin:0 0 14px;padding:13px 16px;background:var(--panel-2);
+          border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:7px;}
+  .detail h3{margin:0 0 9px;font-size:14px;}
+  .detail ul{margin:6px 0 0 18px;padding:0;color:var(--muted);font-size:13px;line-height:1.75;}
+  .kv{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}
+  .kv span{background:var(--chip);border:1px solid var(--line);border-radius:5px;
+           padding:3px 9px;font-size:12px;color:var(--muted);}
+  .empty{padding:30px;text-align:center;color:var(--muted);font-size:13px;line-height:2;}
+  code{background:var(--chip);padding:2px 6px;border-radius:4px;font-size:12px;color:#79c0ff;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>A股 AI 智能选股系统</h1>
+    <span class="badge state" id="stateBadge">加载中…</span>
+    <span class="badge" id="dateBadge">—</span>
+    <span class="badge" id="poolBadge">—</span>
+    <span class="spacer"></span>
+    <button onclick="loadAll()">刷新</button>
+    <button onclick="runReview()">补复盘</button>
+  </header>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="grid2">
+    <div class="panel">
+      <h2>市场宽度趋势（站上均线的股票占比）</h2>
+      <div class="chart" id="chartBreadth"></div>
+    </div>
+    <div class="panel">
+      <h2>涨停 / 跌停生态</h2>
+      <div class="chart" id="chartLimit"></div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom:16px;">
+    <h2>候选股票</h2>
+    <div class="tabs" id="tierTabs"></div>
+    <div id="recDetail"></div>
+    <div id="recTable"><div class="empty">加载中…</div></div>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <h2>复盘统计</h2>
+      <div id="reviewBox"><div class="empty">加载中…</div></div>
+    </div>
+    <div class="panel">
+      <h2>策略命中（最新数据日）</h2>
+      <div id="strategyBox"><div class="empty">加载中…</div></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>策略 Skill 库 <span class="muted" style="font-weight:400;font-size:12px;">
+      （每个策略独立档案 + 参数版本 + 历史成功率，点行看详情）</span></h2>
+    <div id="skillBox"><div class="empty">加载中…</div></div>
+    <div id="skillDetail"></div>
+  </div>
+</div>
+
+<script>
+const TIER_LABEL = {short:"短线", swing:"波段", value:"价值"};
+const TIER_ORDER = ["short","swing","value"];
+let currentRec = null;
+let activeTier = "swing";
+let charts = {};
+
+const fmt = (v,d=2)=> (v===null||v===undefined||isNaN(v)) ? "-" : Number(v).toFixed(d);
+const yi = v => (v===null||v===undefined) ? "-" : (v/1e8).toFixed(0)+"亿";
+const cls = v => v>0?"up":(v<0?"down":"muted");
+const pct = v => (v===null||v===undefined)?"-":(v>0?"+":"")+Number(v).toFixed(2)+"%";
+
+async function get(url){
+  try{
+    const r = await fetch(url);
+    if(!r.ok) return null;
+    return await r.json();
+  }catch(e){ return null; }
+}
+
+function setCards(m){
+  const items = [
+    ["市场宽度 MA20", fmt(m.breadth_ma20,1), "%"],
+    ["市场宽度 MA60", fmt(m.breadth_ma60,1), "%"],
+    ["涨停家数", m.limit_up_count ?? "-", "家"],
+    ["跌停家数", m.limit_down_count ?? "-", "家"],
+    ["炸板率", fmt(m.broken_rate,1), "%"],
+    ["全市场成交额", yi(m.total_amount), ""],
+  ];
+  document.getElementById("cards").innerHTML = items.map(([k,v,u])=>
+    `<div class="card"><div class="k">${k}</div><div class="v">${v}<small>${u}</small></div></div>`
+  ).join("");
+}
+
+function emptyHint(msg, cmd){
+  return `<div class="empty">${msg}<br><code>${cmd}</code></div>`;
+}
+
+async function loadMarket(){
+  const latest = await get("/api/market/latest");
+  if(!latest || !latest.available){
+    document.getElementById("stateBadge").textContent = "无数据";
+    document.getElementById("cards").innerHTML = emptyHint("尚未生成市场状态数据","python -m astock.cli daily");
+    return;
+  }
+  const m = latest.data;
+  document.getElementById("stateBadge").textContent =
+     `${m.state_label}　置信度 ${fmt(m.confidence,2)}`;
+  document.getElementById("dateBadge").textContent = `数据日 ${m.date}`;
+  setCards(m);
+
+  const hist = await get("/api/market/history?days=120");
+  drawBreadth(hist?.records || []);
+  drawLimit(hist?.records || []);
+}
+
+function initChart(id){
+  if(charts[id]) return charts[id];
+  const el = document.getElementById(id);
+  if(!el || typeof echarts === "undefined") return null;
+  charts[id] = echarts.init(el);
+  window.addEventListener("resize", ()=>charts[id] && charts[id].resize());
+  return charts[id];
+}
+
+const BASE_GRID = {left:48,right:18,top:26,bottom:32};
+const AXIS_STYLE = {axisLine:{lineStyle:{color:"#30363d"}},axisLabel:{color:"#8b949e",fontSize:11},
+                    splitLine:{lineStyle:{color:"#1f242c"}}};
+
+function drawBreadth(rows){
+  const c = initChart("chartBreadth"); if(!c) return;
+  const dates = rows.map(r=>r.date);
+  c.setOption({
+    grid:BASE_GRID,
+    tooltip:{trigger:"axis",backgroundColor:"#161b22",borderColor:"#30363d",textStyle:{color:"#e6edf3"}},
+    legend:{data:["MA20上方","MA60上方"],textStyle:{color:"#8b949e"},top:0,right:0},
+    xAxis:{type:"category",data:dates,...AXIS_STYLE,splitLine:{show:false}},
+    yAxis:{type:"value",min:0,max:100,...AXIS_STYLE},
+    series:[
+      {name:"MA20上方",type:"line",smooth:true,showSymbol:false,data:rows.map(r=>r.breadth_ma20),
+       lineStyle:{width:2,color:"#58a6ff"},areaStyle:{color:"#58a6ff22"}},
+      {name:"MA60上方",type:"line",smooth:true,showSymbol:false,data:rows.map(r=>r.breadth_ma60),
+       lineStyle:{width:2,color:"#d29922"}}
+    ]
+  });
+}
+
+function drawLimit(rows){
+  const c = initChart("chartLimit"); if(!c) return;
+  c.setOption({
+    grid:BASE_GRID,
+    tooltip:{trigger:"axis",backgroundColor:"#161b22",borderColor:"#30363d",textStyle:{color:"#e6edf3"}},
+    legend:{data:["涨停","跌停","炸板率"],textStyle:{color:"#8b949e"},top:0,right:0},
+    xAxis:{type:"category",data:rows.map(r=>r.date),...AXIS_STYLE,splitLine:{show:false}},
+    yAxis:[{type:"value",...AXIS_STYLE,name:"家数",nameTextStyle:{color:"#8b949e"}},
+           {type:"value",min:0,max:100,...AXIS_STYLE,name:"炸板率%",nameTextStyle:{color:"#8b949e"}}],
+    series:[
+      {name:"涨停",type:"bar",data:rows.map(r=>r.limit_up_count),itemStyle:{color:"#f85149"},barMaxWidth:14},
+      {name:"跌停",type:"bar",data:rows.map(r=>r.limit_down_count),itemStyle:{color:"#3fb950"},barMaxWidth:14},
+      {name:"炸板率",type:"line",yAxisIndex:1,smooth:true,showSymbol:false,
+       data:rows.map(r=>r.broken_rate),lineStyle:{color:"#d29922",width:2}}
+    ]
+  });
+}
+
+function renderTabs(recs){
+  const counts = {}; TIER_ORDER.forEach(t=>counts[t]=recs.filter(r=>r.tier===t).length);
+  document.getElementById("tierTabs").innerHTML = TIER_ORDER.map(t=>
+    `<div class="tab ${t===activeTier?"active":""}" onclick="switchTier('${t}')">
+       ${TIER_LABEL[t]}档 <span class="muted">(${counts[t]})</span></div>`
+  ).join("");
+}
+
+function switchTier(t){ activeTier = t; renderRecs(); }
+
+function renderRecs(){
+  if(!currentRec || !currentRec.records || !currentRec.records.length){
+    document.getElementById("recTable").innerHTML =
+      emptyHint("暂无推荐记录","python -m astock.cli daily");
+    document.getElementById("recDetail").innerHTML = "";
+    return;
+  }
+  renderTabs(currentRec.records);
+  const rows = currentRec.records.filter(r=>r.tier===activeTier)
+                               .sort((a,b)=>a.tier_rank-b.tier_rank);
+  if(!rows.length){
+    document.getElementById("recTable").innerHTML =
+      `<div class="empty">该档今日无候选（市场状态可能已降低该档权重）</div>`;
+    return;
+  }
+  const head = `<tr><th>#</th><th>代码</th><th>名称</th><th>策略</th><th class="num">综合分</th>
+    <th class="num">收盘</th><th class="num">涨跌</th><th class="num">换手</th><th class="num">量比</th>
+    <th class="num">RPS120</th><th>次日结果</th></tr>`;
+  const body = rows.map(r=>{
+    const rv = r.review;
+    const resMap = {win:'<span class="up">涨</span>', loss:'<span class="down">跌</span>',
+                    flat:'<span class="muted">平</span>'};
+    const res = rv ? `${resMap[rv.result]||""} ${pct(rv.next_pct_chg)}` : '<span class="muted">待复盘</span>';
+    return `<tr onclick="showDetail('${r.rec_id}')">
+      <td>${r.tier_rank}</td><td>${r.code}</td><td>${r.name||"-"}</td>
+      <td>${r.strategy_label||"-"}</td>
+      <td class="num score">${fmt(r.final_score,1)}</td>
+      <td class="num">${fmt(r.close)}</td>
+      <td class="num ${cls(r.pct_chg)}">${pct(r.pct_chg)}</td>
+      <td class="num">${fmt(r.turn,2)}%</td>
+      <td class="num">${fmt(r.vol_ratio,2)}</td>
+      <td class="num">${fmt(r.rps120,1)}</td>
+      <td>${res}</td></tr>`;
+  }).join("");
+  document.getElementById("recTable").innerHTML =
+    `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  showDetail(rows[0].rec_id);
+}
+
+function showDetail(recId){
+  const r = (currentRec?.records||[]).find(x=>x.rec_id===recId);
+  if(!r){ document.getElementById("recDetail").innerHTML=""; return; }
+  const reasons = (r.reasons||[]).map(x=>`<li>${x}</li>`).join("");
+  const detail = r.score_detail||{};
+  const kv = Object.entries(detail).map(([k,v])=>`<span>${k} ${v}</span>`).join("");
+  document.getElementById("recDetail").innerHTML =
+    `<div class="detail">
+       <h3>${r.code} ${r.name||""}　<span class="score">综合分 ${fmt(r.final_score,1)}</span></h3>
+       <div class="muted">命中策略：${r.strategy_label||"-"}　|　市场状态：${r.market_label||"-"}　|　参数版本：${r.params_version||"-"}</div>
+       <ul>${reasons}</ul>
+       <div class="kv">${kv}</div>
+     </div>`;
+}
+
+async function loadRecommend(){
+  const data = await get("/api/recommend/latest");
+  if(!data || !data.available){
+    document.getElementById("recTable").innerHTML =
+      emptyHint("暂无推荐记录，请先运行每日流程","python -m astock.cli daily");
+    document.getElementById("tierTabs").innerHTML="";
+    document.getElementById("recDetail").innerHTML="";
+    return;
+  }
+  currentRec = data;
+  renderRecs();
+}
+
+async function loadReview(){
+  const s = await get("/api/review/summary?days=90");
+  const box = document.getElementById("reviewBox");
+  if(!s || !s.count){
+    box.innerHTML = emptyHint("暂无复盘样本（推荐后需等到次一交易日收盘）","python -m astock.cli review");
+    return;
+  }
+  const tierRows = Object.entries(s.by_tier||{}).map(([t,v])=>
+    `<tr><td>${TIER_LABEL[t]||t}</td><td class="num">${v.count}</td>
+     <td class="num">${fmt(v.win_rate,1)}%</td>
+     <td class="num ${cls(v.avg_return)}">${pct(v.avg_return)}</td></tr>`).join("");
+  const stratRows = Object.entries(s.by_strategy||{}).map(([n,v])=>
+    `<tr><td>${n}</td><td class="num">${v.count}</td>
+     <td class="num">${fmt(v.win_rate,1)}%</td>
+     <td class="num ${cls(v.avg_return)}">${pct(v.avg_return)}</td></tr>`).join("");
+  box.innerHTML = `
+    <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-bottom:12px;">
+      <div class="card"><div class="k">样本数</div><div class="v">${s.count}</div></div>
+      <div class="card"><div class="k">胜率</div><div class="v">${fmt(s.win_rate,1)}<small>%</small></div></div>
+      <div class="card"><div class="k">平均次日收益</div>
+        <div class="v ${cls(s.avg_return)}">${pct(s.avg_return)}</div></div>
+    </div>
+    <table><thead><tr><th>档位</th><th class="num">样本</th><th class="num">胜率</th><th class="num">平均收益</th></tr></thead>
+      <tbody>${tierRows}</tbody></table>
+    <h2 style="margin:14px 0 10px;">分策略</h2>
+    <table><thead><tr><th>策略</th><th class="num">样本</th><th class="num">胜率</th><th class="num">平均收益</th></tr></thead>
+      <tbody>${stratRows}</tbody></table>`;
+}
+
+const VERDICT = {
+  effective:{text:"有效", cls:"up"}, watching:{text:"观察", cls:"warn"},
+  ineffective:{text:"无效", cls:"down"}, insufficient:{text:"样本不足", cls:"muted"},
+  no_data:{text:"未回测", cls:"muted"},
+};
+
+async function loadSkills(){
+  const data = await get("/api/skills");
+  const box = document.getElementById("skillBox");
+  if(!data || !data.available){
+    box.innerHTML = emptyHint("Skill 库尚未生成","python -m astock.cli skills sync");
+    return;
+  }
+  const rows = (data.skills||[]).sort((a,b)=>
+    (TIER_ORDER.indexOf(a.tier)-TIER_ORDER.indexOf(b.tier)) || a.name.localeCompare(b.name));
+  const body = rows.map(s=>{
+    const v = VERDICT[s.verdict] || VERDICT.no_data;
+    return `<tr onclick="showSkill('${s.name}')">
+      <td><span class="badge">${TIER_LABEL[s.tier]||s.tier}</span></td>
+      <td>${s.label}</td>
+      <td class="muted">${s.name}</td>
+      <td>v${s.version||"-"}</td>
+      <td class="num">${s.sample_size ?? "-"}</td>
+      <td class="num">${s.win_rate ?? "-"}%</td>
+      <td class="num ${cls(s.avg_ret1)}">${s.avg_ret1==null?"-":pct(s.avg_ret1)}</td>
+      <td class="${v.cls}">${v.text}</td>
+    </tr>`;
+  }).join("");
+  box.innerHTML = `<div class="muted" style="margin-bottom:8px;font-size:12px;">
+      共 ${data.count} 个策略 · 生成于 ${data.generated_at||"-"}</div>
+    <table><thead><tr><th>档位</th><th>策略</th><th>标识</th><th>版本</th>
+      <th class="num">样本</th><th class="num">胜率</th><th class="num">T+1平均</th>
+      <th>判定</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
+async function showSkill(name){
+  const d = await get("/api/skills/"+encodeURIComponent(name));
+  const el = document.getElementById("skillDetail");
+  if(!d){ el.innerHTML=""; return; }
+  const meta = d.meta||{};
+  const perf = d.performance||{};
+  const bt = perf.backtest||{};
+  const quotes = (meta.conditions||[]).map(c=>`<li>${c}</li>`).join("");
+  const pitfalls = (meta.pitfalls||[]).map(p=>`<li>${p}</li>`).join("");
+  const stateRows = Object.entries(bt.by_market_state||{}).map(([k,v])=>
+    `<tr><td>${k}</td><td class="num">${v.count??"-"}</td>
+     <td class="num">${v.win_rate??"-"}%</td>
+     <td class="num ${cls(v.avg_ret1)}">${v.avg_ret1==null?"-":pct(v.avg_ret1)}</td></tr>`).join("");
+  el.innerHTML = `<div class="detail">
+    <h3>${meta.label||name} <span class="muted">(${name})</span>
+      　<span class="badge">v${meta.version||"-"}</span>
+      　<span class="badge">${meta.status||"-"}</span></h3>
+    <div class="muted">${meta.description||""}</div>
+    <div style="margin-top:10px;"><b>判定条件</b><ul>${quotes||"<li>-</li>"}</ul></div>
+    <div><b>已知失效场景</b><ul>${pitfalls||"<li>-</li>"}</ul></div>
+    ${stateRows?`<div style="margin-top:6px;"><b>分市场状态表现</b>
+      <table style="margin-top:6px;"><thead><tr><th>状态</th><th class="num">样本</th>
+      <th class="num">胜率</th><th class="num">T+1平均</th></tr></thead>
+      <tbody>${stateRows}</tbody></table></div>`:""}
+    <div class="kv" style="margin-top:10px;">
+      <span>文件：skills/${name}/SKILL.md</span>
+      <span>参数：${Object.entries(meta.params||{}).map(([k,v])=>k+"="+v).join(", ")||"-"}</span>
+    </div>
+  </div>`;
+}
+
+async function loadStrategies(){
+  const data = await get("/api/strategies");
+  const box = document.getElementById("strategyBox");
+  if(!data || !data.available){
+    box.innerHTML = emptyHint("暂无数据","python -m astock.cli factor");
+    return;
+  }
+  document.getElementById("poolBadge").textContent =
+    `股票池 ${data.pool_size} 只 · ${data.data_date}`;
+  const rows = [];
+  TIER_ORDER.forEach(t=>{
+    (data.tiers[t]||[]).forEach(s=>rows.push(
+      `<tr><td><span class="badge">${TIER_LABEL[t]}</span></td>
+       <td>${s.label}</td><td class="muted">${s.name}</td>
+       <td class="num">${s.hits}</td></tr>`));
+  });
+  box.innerHTML = `<table><thead><tr><th>档位</th><th>策略</th><th>标识</th>
+    <th class="num">命中</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+}
+
+async function runReview(){
+  const r = await fetch("/api/review/run",{method:"POST"});
+  const d = await r.json().catch(()=>null);
+  alert(d ? `复盘完成：处理 ${d.pending} 条，成功 ${d.reviewed} 条，等待 ${d.waiting} 条` : "复盘失败");
+  loadAll();
+}
+
+async function loadAll(){
+  await Promise.all([
+    loadMarket(), loadRecommend(), loadReview(), loadStrategies(), loadSkills()
+  ]);
+}
+
+loadAll();
+</script>
+</body>
+</html>
