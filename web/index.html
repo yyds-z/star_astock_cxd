@@ -61,6 +61,29 @@
            padding:3px 9px;font-size:12px;color:var(--muted);}
   .empty{padding:30px;text-align:center;color:var(--muted);font-size:13px;line-height:2;}
   code{background:var(--chip);padding:2px 6px;border-radius:4px;font-size:12px;color:#79c0ff;}
+
+  /* ---------- 操作台（v1.0 决策依据）---------- */
+  .sec{margin:24px 0 12px;padding-top:15px;border-top:1px solid var(--line);
+       color:var(--muted);font-size:12px;letter-spacing:1.5px;}
+  .desk{border-color:#1f6feb55;background:linear-gradient(180deg,#131a2410,#161b22);}
+  .desk > h2{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;}
+  .tag{font-size:11px;padding:2px 8px;border-radius:4px;border:1px solid var(--line);
+       color:var(--muted);font-weight:400;}
+  .tag.ok{border-color:#3fb95066;color:#56d364;background:#3fb95014;}
+  .tag.bad{border-color:#f8514966;color:#ff7b72;background:#f8514914;}
+  .tag.warn{border-color:#d2992266;color:#e3b341;background:#d2992214;}
+  .rules{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 12px;}
+  .rules span{background:var(--chip);border:1px solid var(--line);border-radius:5px;
+              padding:4px 10px;font-size:12px;color:var(--muted);}
+  .chip{padding:4px 11px;border-radius:14px;background:var(--chip);border:1px solid var(--line);
+        cursor:pointer;font-size:12px;color:var(--muted);user-select:none;}
+  .chip.active{background:#1f6feb22;border-color:#1f6feb66;color:#79c0ff;}
+  .chart-lg{height:340px;width:100%;}
+  .stat-table td,.stat-table th{padding:6px 9px;font-size:12px;}
+  .verdict{margin-top:10px;padding:10px 13px;border-radius:7px;font-size:13px;line-height:1.7;
+           border:1px solid var(--line);border-left:3px solid var(--accent);background:var(--panel-2);}
+  .verdict b{color:#79c0ff;}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:1px;}
 </style>
 </head>
 <body>
@@ -74,6 +97,45 @@
     <button onclick="loadAll()">刷新</button>
     <button onclick="runReview()">补复盘</button>
   </header>
+
+  <!-- ==================== 操作台：v1.0 决策依据（默认首屏） ==================== -->
+  <div class="panel desk" style="margin-bottom:16px;">
+    <h2>操作台 · 影子信号
+      <span class="tag ok">v1.0 决策依据</span>
+      <span class="tag" id="deskDate">—</span>
+    </h2>
+    <div class="muted" style="font-size:12px;margin-bottom:12px;">
+      逻辑：涨停基因（近 28 日有涨停且距上次 ≤10 天）+ 缩量（量 &lt; 前 5 日均量 70%）+ 不破位。
+      检验：次日涨停率 9.2%（全市场 2.05%），可实现超额 +0.667%/日（观察期选参 → 验证期 t=3.56）。
+    </div>
+    <div class="cards" id="deskKpi"></div>
+    <div class="rules" id="deskRules"></div>
+    <div class="tabs" id="shadowTabs"></div>
+    <div id="shadowTable"><div class="empty">加载中…</div></div>
+    <div id="deskVerdict"></div>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <h2>净值曲线　<span class="tag" id="eqRun">—</span></h2>
+      <div class="chart-lg" id="chartEquity"></div>
+      <div id="eqStats"></div>
+    </div>
+    <div class="panel">
+      <h2>校准曲线　<span class="tag">评分分位 → 实际超额</span></h2>
+      <div class="chart-lg" id="chartCalib"></div>
+      <div class="muted" style="font-size:12px;margin-top:8px;" id="calibHint">
+        纵轴为该分位相对全样本均值的超额收益。若评分有排序能力，柱形应自左向右单调上升。
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom:16px;">
+    <h2>板块热力图　<span class="tag">面积 = 成交额　颜色 = 平均涨跌幅</span></h2>
+    <div class="chart-lg" id="chartMap" style="height:380px;"></div>
+  </div>
+
+  <div class="sec">行情与观察池（主链路已降级：可实现口径超额 t=0.09，不再作为投资依据）</div>
 
   <div class="cards" id="cards"></div>
 
@@ -162,7 +224,7 @@ async function loadMarket(){
   const m = latest.data;
   document.getElementById("stateBadge").textContent =
      `${m.state_label}　置信度 ${fmt(m.confidence,2)}`;
-  document.getElementById("dateBadge").textContent = `数据日 ${m.date}`;
+  document.getElementById("dateBadge").textContent = `数据日 ${d10(m.date)}`;
   setCards(m);
 
   const hist = await get("/api/market/history?days=120");
@@ -399,7 +461,7 @@ async function loadStrategies(){
     return;
   }
   document.getElementById("poolBadge").textContent =
-    `股票池 ${data.pool_size} 只 · ${data.data_date}`;
+    `股票池 ${data.pool_size} 只 · ${d10(data.data_date)}`;
   const rows = [];
   TIER_ORDER.forEach(t=>{
     (data.tiers[t]||[]).forEach(s=>rows.push(
@@ -418,8 +480,280 @@ async function runReview(){
   loadAll();
 }
 
+/* ==================== 操作台（v1.0 决策依据） ==================== */
+let shadowData = null;
+let shadowFilter = "全部";
+
+const d10 = v => v ? String(v).slice(0,10) : "";
+const SHADOW_CLS = {"可买":"up","涨幅过大·回避":"warn","已涨停·放弃":"muted","无快照":"muted"};
+
+async function loadDesk(){
+  const [d, h, st, mk, eq] = await Promise.all([
+    get("/api/shadow/latest"),
+    get("/api/shadow/history?days=60"),
+    get("/api/status"),
+    get("/api/market/history?days=25"),
+    get("/api/equity"),
+  ]);
+  renderDeskKpi(d, h, st, mk);
+  renderShadow(d);
+  renderStopRules(h, mk, eq);
+}
+
+function renderDeskKpi(d, h, st, mk){
+  const summary = (st && st.summary) || {};
+  const agg = (h && h.aggregate) || {};
+  const counts = (d && d.status_counts) || {};
+  const trading = ((mk && mk.records) || []).map(r => d10(r.date));
+  const sigDays = new Set((((h && h.records) || [])).map(r => d10(r.date)));
+  const covered = trading.filter(x => sigDays.has(x)).length;
+  const cover = trading.length ? (covered / trading.length * 100) : null;
+  const snapDays = summary.snapshot_days ?? 0;
+  const ex = agg.mean_excess, t = agg.t;
+  // 无盘中快照时**不能**显示"可执行 0 只"——那是把"没核对"说成"买不了"，
+  // 与"口径不对比没有数据更糟"同一个错。此时只报候选总数。
+  const hasSnap = !!(d && d.snapshot_date);
+  const items = [
+    [hasSnap ? "可执行（已核对实况）" : "本信号日候选（无盘中快照）",
+     hasSnap ? (counts["可买"] ?? 0) : ((d && d.count) || 0),
+     hasSnap ? `只 / 共 ${(d && d.count) || 0}` : "只"],
+    ["已结算日数", agg.days ?? 0, "日"],
+    ["日均超额", ex==null ? "-" : ((ex>0?"+":"")+Number(ex).toFixed(3)), "%"],
+    ["显著性 t", t==null ? "-" : t, t!=null && t>=2 ? "达标" : "未达标"],
+    ["G1 信号覆盖", cover==null ? "-" : fmt(cover,0), "% / 近20日"],
+    ["G2 快照进度", snapDays, "/ 60 日"],
+  ];
+  document.getElementById("deskKpi").innerHTML = items.map(([k,v,u])=>
+    `<div class="card"><div class="k">${k}</div><div class="v">${v}<small>${u}</small></div></div>`
+  ).join("");
+}
+
+function renderShadow(d){
+  const box = document.getElementById("shadowTable");
+  const rules = document.getElementById("deskRules");
+  if(!d || !d.available){
+    document.getElementById("deskDate").textContent = "无信号";
+    box.innerHTML = emptyHint(d && d.hint ? d.hint : "暂无影子信号",
+                              "python -m astock.cli daily");
+    rules.innerHTML = "";
+    return;
+  }
+  shadowData = d;
+  document.getElementById("deskDate").textContent =
+    `信号日 ${d.signal_date}` + (d.snapshot_date
+      ? `　实况 ${d.snapshot_date} ${d.snapshot_slot || ""}` : "　（该日尚无盘中快照，仅信号）");
+  rules.innerHTML = (d.rules || []).map(r => `<span>${r}</span>`).join("");
+
+  const counts = d.status_counts || {};
+  const states = Object.keys(counts);
+  const chips = [`全部 (${d.count})`].concat(states.map(s => `${s} (${counts[s]})`));
+  document.getElementById("shadowTabs").innerHTML = chips.map(label => {
+    const key = label.split(" (")[0];
+    return `<div class="chip ${key===shadowFilter?"active":""}"
+              onclick="setShadowFilter('${key}')">${label}</div>`;
+  }).join("");
+
+  const rows = (d.records || []).filter(r => shadowFilter==="全部" || r.status===shadowFilter);
+  if(!rows.length){ box.innerHTML = `<div class="empty">该状态下无候选</div>`; return; }
+  const hasSnap = !!(d.snapshot_date);
+  const head = `<tr><th>代码</th><th>名称</th><th class="num">信号分</th>
+    <th class="num">信号日收盘</th>${hasSnap?`<th class="num">现价</th><th class="num">涨幅</th><th class="num">量比</th>`:""}
+    <th class="num">连板</th><th class="num">距上次涨停</th><th>状态</th></tr>`;
+  const body = rows.map(r => `<tr onclick="gotoStock('${r.code}')">
+      <td>${r.code}</td><td>${r.name||"-"}</td>
+      <td class="num score">${fmt(r.signal_score,1)}</td>
+      <td class="num">${fmt(r.sig_close)}</td>
+      ${hasSnap?`<td class="num">${fmt(r.snap_price)}</td>
+        <td class="num ${cls(r.snap_pct)}">${r.snap_pct==null?"-":pct(r.snap_pct)}</td>
+        <td class="num">${fmt(r.snap_volume_ratio,2)}</td>`:""}
+      <td class="num">${r.zt20 ?? "-"}</td>
+      <td class="num">${r.days_since_zt ?? "-"}</td>
+      <td class="${SHADOW_CLS[r.status]||""}">${r.status}</td></tr>`).join("");
+  box.innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>
+    <div class="muted" style="font-size:12px;margin-top:8px;">
+      共 ${rows.length} 只 · 信号分只是<b>缩量程度排序</b>，不是胜率排序 —— 请等权分散持有，不要重仓前几名。
+    </div>`;
+}
+
+function setShadowFilter(k){ shadowFilter = k; renderShadow(shadowData); }
+function gotoStock(code){ alert("个股详情请在下方「候选股票」区块查看，或直接查代码 " + code); }
+
+function renderStopRules(h, mk, eq){
+  const box = document.getElementById("deskVerdict");
+  const rowsH = ((h && h.records) || []).filter(r => r.settled > 0).slice(0, 20);
+  const ex = rowsH.map(r => r.avg_excess).filter(v => v !== null && v !== undefined);
+  const roll20 = ex.length ? ex.reduce((a,b)=>a+b,0)/ex.length : null;
+  const win = rowsH.length ? `${d10(rowsH[rowsH.length-1].date)} ~ ${d10(rowsH[0].date)}` : "-";
+
+  // R2（单日组合跌幅）：**必须用净值序列算**，不能用 ads_shadow_pick 的日均收益 ——
+  // 候选数极少的日子（如只有 1~2 只）日均收益会被单只股票主导，
+  // 实测出现 "-8.24%" 这种等权组合根本不可能的单日跌幅，属于口径错误。
+  // 净值序列由每日等权候选复利而来，与下方曲线同源。
+  let worst = null, worstDay = null;
+  const sc = ((eq && eq.curves) || []).find(c => (c.name||"").indexOf("影子") >= 0);
+  if(sc && sc.nav && sc.nav.length > 1){
+    for(let i=1;i<sc.nav.length;i++){
+      const r = sc.nav[i]/sc.nav[i-1] - 1;
+      if(worst === null || r < worst){ worst = r * 100; worstDay = eq.dates[i]; }
+    }
+  }
+  // 数据链路：最新交易日与最新信号日之间的交易日间隔
+  const trading = ((mk && mk.records) || []).map(r => d10(r.date)).sort();
+  const sigLatest = (h && h.records && h.records.length) ? d10(h.records[0].date) : null;
+  const gap = (trading.length && sigLatest) ? trading.filter(x => x > sigLatest).length : null;
+
+  const p4 = v => v===null||v===undefined ? "-" : (v>0?"+":"")+Number(v).toFixed(3)+"%";
+  const rules = [
+    ["滚动 20 日超额 < 0", roll20, roll20 !== null && roll20 < 0, p4(roll20),
+     roll20 !== null && roll20 < 0 && Math.abs(roll20) < 0.05 ? "贴线（≈0，可视作零）" : ""],
+    ["单日组合跌幅 > 8%", worst, worst !== null && worst < -8, p4(worst),
+     worstDay ? `最差 ${d10(worstDay)}` : ""],
+    ["数据链路连续 3 日失败", gap, gap !== null && gap >= 3,
+     gap===null ? "-" : `落后 ${gap} 个交易日`, ""],
+  ];
+  const hit = rules.filter(r => r[2]);
+  const head = hit.length
+    ? `<b class="down">⚠ 停止规则触发 ${hit.length} 项 —— 按 v1.0 契约应停止使用并整体复盘，不再调参。</b>`
+    : `<b>停止规则监控：全部正常</b>`;
+  box.innerHTML = `<div class="verdict">${head}
+    <div class="muted" style="margin-top:6px;font-size:12px;">
+      ${rules.map(r=>`<span class="dot" style="background:${r[2]?"#f85149":"#3fb950"}"></span>`
+          + `<b style="color:${r[2]?"#ff7b72":"#e6edf3"}">${r[0]}</b>：${r[3]}`
+          + (r[4]?`　<span style="opacity:.75">${r[4]}</span>`:"") + "　").join("")}
+    </div>
+    <div class="muted" style="margin-top:6px;font-size:12px;">
+      统计窗口 ${win}（<b>历史回填样本 ${rowsH.length} 日</b>；v1.0 纸面跟踪自 2026-09-30 起算，
+      停止规则最终以**上线后**样本为准）。验收（G3）在 2027-01 首个复盘日：
+      日度超额 t ≥ 2 且为正 → 维持；t &lt; 2 → 降半仓；≤ 0 → 停用。在此之前只按规则执行、不改规则。
+    </div></div>`;
+}
+
+async function loadEquity(){
+  const d = await get("/api/equity");
+  const el = document.getElementById("chartEquity");
+  const c = initChart("chartEquity");
+  const statsBox = document.getElementById("eqStats");
+  if(!d || !d.available){
+    if(el) el.innerHTML = `<div class="empty">暂无回测数据<br><code>python -m astock.cli backtest</code></div>`;
+    statsBox.innerHTML = "";
+    return;
+  }
+  document.getElementById("eqRun").textContent = `轮次 ${d.run_id||"-"}　${d.span[0]} ~ ${d.span[1]}`;
+  if(c){
+    const ax = JSON.parse(JSON.stringify(AXIS_STYLE));
+    c.setOption({
+      grid:{left:56,right:20,top:38,bottom:58},
+      tooltip:{trigger:"axis",backgroundColor:"#161b22",borderColor:"#30363d",
+               textStyle:{color:"#e6edf3"},
+               valueFormatter:v => (v==null?"-":(v*100).toFixed(1)+"%")},
+      legend:{textStyle:{color:"#8b949e"},top:0,left:0,itemWidth:14,itemHeight:8},
+      dataZoom:[{type:"inside"},{type:"slider",height:16,bottom:10,
+                 borderColor:"#242c3a",fillerColor:"#1f6feb22",
+                 textStyle:{color:"#8b949e",fontSize:10}}],
+      xAxis:{type:"category",data:d.dates,...ax,splitLine:{show:false}},
+      yAxis:{type:"value",scale:true,...ax,
+             axisLabel:{color:"#8b949e",fontSize:11,formatter:v=>((v-1)*100).toFixed(0)+"%"}},
+      series:d.curves.map(cu=>({
+        name:cu.name, type:"line", showSymbol:false, smooth:false, data:cu.nav,
+        lineStyle:{width:2, color:cu.color, type:cu.dashed?"dashed":"solid"},
+        emphasis:{focus:"series"},
+      })),
+    });
+  }
+  const cols = ["曲线","累计","年化","最大回撤","Sharpe","日超额","t","天数"];
+  statsBox.innerHTML = `<table class="stat-table" style="margin-top:10px;">
+    <thead><tr>${cols.map((h,i)=>`<th class="${i?"num":""}">${h}</th>`).join("")}</tr></thead>
+    <tbody>${d.curves.map(cu=>{
+      const s = cu.stats||{}, x = cu.excess||{};
+      const p = v => v==null ? "-" : ((v>0?"+":"")+(v*100).toFixed(2)+"%");
+      return `<tr>
+        <td><span style="color:${cu.color}">■</span> ${cu.name}</td>
+        <td class="num ${cls(s.total)}">${p(s.total)}</td>
+        <td class="num ${cls(s.annual)}">${p(s.annual)}</td>
+        <td class="num down">${p(s.max_dd)}</td>
+        <td class="num">${fmt(s.sharpe,2)}</td>
+        <td class="num ${cls(x.mean)}">${p(x.mean)}</td>
+        <td class="num ${x.t!=null && Math.abs(x.t)>=2 ? "up":"muted"}">${fmt(x.t,2)}</td>
+        <td class="num">${s.days ?? "-"}</td></tr>`;
+    }).join("")}</tbody></table>
+    <div class="muted" style="font-size:12px;margin-top:8px;">${d.judgement||""}</div>`;
+}
+
+async function loadCalibration(){
+  const d = await get("/api/calibration");
+  const c = initChart("chartCalib");
+  if(!d || !c) return;
+  const groups = (d.groups||[]).filter(g => (g.labels||[]).length);
+  if(!groups.length){
+    document.getElementById("chartCalib").innerHTML =
+      `<div class="empty">暂无校准数据（需回测明细）</div>`;
+    return;
+  }
+  const n = Math.max(...groups.map(g => g.labels.length));
+  const cats = Array.from({length:n}, (_,i)=>"Q"+(i+1));
+  const colors = ["#58a6ff","#f85149"];
+  const ax = JSON.parse(JSON.stringify(AXIS_STYLE));
+  c.setOption({
+    grid:{left:52,right:18,top:38,bottom:36},
+    tooltip:{trigger:"axis",backgroundColor:"#161b22",borderColor:"#30363d",
+             textStyle:{color:"#e6edf3"},
+             formatter:ps => ps.map(p=>`${p.seriesName} ${p.axisValue}：${p.value==null?"-":p.value.toFixed(3)+"%"}`
+                 + (p.data&&p.data.n?`（${p.data.n} 笔）`:"")).join("<br>")},
+    legend:{textStyle:{color:"#8b949e"},top:0,left:0,itemWidth:14,itemHeight:8},
+    xAxis:{type:"category",data:cats,...ax,splitLine:{show:false},
+           name:"评分分位（低→高）",nameTextStyle:{color:"#8b949e",fontSize:11}},
+    yAxis:{type:"value",...ax,axisLabel:{color:"#8b949e",fontSize:11,formatter:v=>v+"%"}},
+    series:groups.map((g,i)=>({
+      name:g.title, type:"bar", barMaxWidth:22,
+      data:cats.map((_,j)=> g.excess[j]==null ? null : {value:g.excess[j], n:g.n[j]}),
+      itemStyle:{color:colors[i%2]},
+    })),
+  });
+  document.getElementById("calibHint").textContent =
+    (d.hint||"") + `　（样本：${groups.map(g=>g.title.split("·")[1]||g.title).join(" / ")}）`;
+}
+
+async function loadSectorMap(){
+  const d = await get("/api/sector/top?n=48");
+  const c = initChart("chartMap");
+  if(!c) return;
+  if(!d || !d.available){
+    document.getElementById("chartMap").innerHTML = `<div class="empty">暂无板块数据</div>`;
+    return;
+  }
+  const heat = p => {
+    if(p==null) return "#30363d";
+    const a = Math.min(1, Math.abs(p)/3);
+    return p>=0 ? `rgba(248,81,73,${0.14+a*0.76})` : `rgba(63,185,80,${0.14+a*0.76})`;
+  };
+  c.setOption({
+    tooltip:{backgroundColor:"#161b22",borderColor:"#30363d",textStyle:{color:"#e6edf3"},
+      formatter:p=>{
+        const r = p.data||{};
+        if(r.raw==null) return p.name;
+        const x = r.raw;
+        return `<b>${p.name}</b><br>成交额 ${yi(x.total_amount)}<br>
+                平均涨跌 <span style="color:${x.avg_pct_chg>0?"#f85149":"#3fb950"}">${pct(x.avg_pct_chg)}</span><br>
+                涨停 ${x.limit_up_count||0} 家 / 成分 ${x.member_count||0}<br>
+                强度分 ${fmt(x.strength_score,1)}`;
+      }},
+    series:[{
+      type:"treemap", roam:false, nodeClick:false, breadcrumb:{show:false},
+      top:6, left:0, right:0, bottom:0,
+      itemStyle:{borderColor:"#0e1116", borderWidth:2, gapWidth:2},
+      label:{color:"#e6edf3", fontSize:11,
+             formatter:p=>`${p.name}\n${pct((p.data&&p.data.raw)?p.data.raw.avg_pct_chg:null)}`},
+      data:(d.records||[]).filter(r=>r.total_amount>0).map(r=>({
+        name:r.industry_name, value:r.total_amount,
+        itemStyle:{color:heat(r.avg_pct_chg)}, raw:r,
+      })),
+    }],
+  });
+}
+
 async function loadAll(){
   await Promise.all([
+    loadDesk(), loadEquity(), loadCalibration(), loadSectorMap(),
     loadMarket(), loadRecommend(), loadReview(), loadStrategies(), loadSkills()
   ]);
 }

@@ -115,18 +115,28 @@ def export(storage: Storage | None = None, bars_days: int = 250) -> dict[str, An
     stats: dict[str, Any] = {}
 
     def dump(name: str, sql: str) -> None:
+        """导出单表。**先写临时文件再原子替换**。
+
+        为什么必须原子：展示层（FastAPI）是长驻进程、随时可能在读这些 parquet，
+        而 daily 会在 18:30 重写它们。若直接覆盖写，读者有机会读到写了一半的文件
+        （表现为网页偶发 500 / "Invalid parquet file"）。临时文件以 `.` 开头，
+        也不会被 `_ensure_view` 的 `{name}.parquet` 规则误注册。
+        """
         file_path = out_dir / f"{name}.parquet"
+        tmp_path = out_dir / f".{name}.parquet.tmp"
         try:
             storage.conn.execute(
-                f"COPY ( {sql} ) TO '{file_path.as_posix()}' "
+                f"COPY ( {sql} ) TO '{tmp_path.as_posix()}' "
                 f"(FORMAT PARQUET, COMPRESSION ZSTD)"
             )
             n = int(
                 storage.query_value(f"SELECT COUNT(*) FROM ( {sql} ) t", default=0) or 0
             )
+            tmp_path.replace(file_path)  # 原子替换：读者要么看到旧版、要么看到新版
             stats[name] = n
         except Exception as exc:  # noqa: BLE001 - 单表失败不应影响其余快照
             logger.warning("导出 %s 失败：%s", name, exc)
+            tmp_path.unlink(missing_ok=True)
 
     for name, sql in SNAPSHOT_QUERIES.items():
         dump(name, sql)
