@@ -160,6 +160,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_sk.add_argument("name", nargs="?", default=None, help="配合 show 使用，如 skills show turtle_trade")
 
+    p_ch = sub.add_parser("charts", help="净值曲线与校准曲线：重绘并导出 SVG / 交互 HTML")
+    p_ch.add_argument("--run-id", type=str, default=None,
+                      help="回测轮次，默认取最新一轮")
+    p_ch.add_argument("--no-html", action="store_true", help="只出 SVG，不生成交互 HTML")
+
     p_bt = sub.add_parser("backtest", help="样本外验证：逐日回放并统计各策略真实胜率")
     p_bt.add_argument("--start", type=str, default=None, help="开始日期 YYYY-MM-DD")
     p_bt.add_argument("--end", type=str, default=None, help="结束日期 YYYY-MM-DD")
@@ -1178,6 +1183,60 @@ def _report_from_stored(storage_provider) -> int:
     return 0
 
 
+def cmd_charts(args) -> int:
+    """重绘净值曲线与校准曲线（不跑回测，只读已有结果）。
+
+    为什么要独立命令：图形是**展示层**，重绘不需要 20 分钟的回测；
+    调样式、换区间、换轮次时都该秒级看到结果。
+    """
+    from astock.backtest import charts
+
+    run_id = getattr(args, "run_id", None) or str(
+        charts.get_storage().query_value("SELECT MAX(run_id) FROM ads_backtest") or ""
+    )
+    curves = charts.build_curves(run_id=run_id)
+    if not curves:
+        print("无可绘制的曲线：需先跑一次 backtest（主链路）并确保影子信号已结算")
+        return 1
+
+    if curves[0].dates:
+        print(f"共同区间：{curves[0].dates[0]} ~ {curves[0].dates[-1]}"
+              f"（{len(curves[0].dates)} 个交易日）")
+    print(f"\n{'曲线':<22}{'交易日':>7}{'累计':>10}{'年化':>9}{'最大回撤':>10}"
+          f"{'Sharpe':>8}{'日超额':>10}{'t':>7}")
+    print("-" * 84)
+    for c in curves:
+        s, e = c.stats(), c.excess or {}
+        ann = s.get("annual")
+        print(f"{c.name:<22}{s.get('days', 0):>7}{s.get('total', 0) * 100:>9.2f}%"
+              f"{(ann * 100 if ann is not None else float('nan')):>8.1f}%"
+              f"{s.get('max_dd', 0) * 100:>9.1f}%{s.get('sharpe') or 0:>8.2f}"
+              f"{e.get('mean', 0) * 100:>9.3f}%{e.get('t', 0):>7.2f}")
+    print("-" * 84)
+    print("判据：看「日超额 / t」，不要只看净值高低 —— 净值受区间与波动拖累影响。")
+
+    out = charts.get_config_out_dir() if hasattr(charts, "get_config_out_dir") else None
+    if out is None:
+        from astock.config import get_config
+
+        out = get_config().data_dir / "backtest"
+    stamp = run_id or "latest"
+    svg = charts.render_equity_svg(curves, subtitle="各自原生口径 · 扣双边 0.3% 成本")
+    (out / f"charts_{stamp}_equity.svg").write_text(svg, encoding="utf-8")
+    print(f"\n净值曲线 SVG：{out / f'charts_{stamp}_equity.svg'}")
+
+    if not getattr(args, "no_html", False):
+        calibs = {
+            "主链路（观察池）": charts.calibration_main(charts.get_storage(), run_id),
+            "影子信号（决策依据）": charts.calibration_shadow(charts.get_storage()),
+        }
+        html_txt = charts.render_equity_html(curves, calibs)
+        p = out / f"charts_{stamp}.html"
+        p.write_text(html_txt, encoding="utf-8")
+        print(f"交互 HTML（可框选缩放）：{p}")
+    return 0
+
+
 def cmd_backtest(args) -> int:
     """样本外验证：按日回放历史，统计各策略真实表现。"""
     from datetime import date, timedelta
@@ -1341,6 +1400,7 @@ COMMANDS = {
     "index": cmd_index,
     "snapshot": cmd_snapshot,
     "shadow": cmd_shadow,
+    "charts": cmd_charts,
     "backtest": cmd_backtest,
     "skills": cmd_skills,
 }

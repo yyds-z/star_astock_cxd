@@ -295,6 +295,81 @@ def render(stats: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _build_charts(run_id: str, out_dir) -> tuple[str, dict[str, str]]:
+    """生成净值曲线（SVG + 交互 HTML）并返回要追加进 Markdown 的章节。
+
+    为什么独立成函数且全程 try/except：图是**展示层**，任何失败都不该让回测报告
+    本身写不出来。SVG 用文件引用而非内联 —— Markdown 内联 SVG 在多数渲染器里
+    会被过滤，而 `![](x.svg)` 在 VS Code 预览与 GitHub 都能正常显示。
+    """
+    from astock.backtest import charts
+
+    curves = charts.build_curves(run_id=run_id)
+    cal_main = charts.calibration_main(charts.get_storage(), run_id)
+    cal_shadow = charts.calibration_shadow(charts.get_storage())
+
+    span = ""
+    if curves and curves[0].dates:
+        span = f"共同区间 {curves[0].dates[0]} ~ {curves[0].dates[-1]}（各曲线严格对齐同一交易日集合）"
+    svg_eq = charts.render_equity_svg(
+        curves, subtitle=f"{span} · 各自原生口径 · 扣双边 0.3% 成本"
+    )
+    eq_file = out_dir / f"backtest_{run_id}_equity.svg"
+    eq_file.write_text(svg_eq, encoding="utf-8")
+
+    paths = {"equity_svg": str(eq_file)}
+    lines = [
+        "",
+        "---",
+        "",
+        "## 净值曲线（策略历史回放）",
+        "",
+        f"![累计净值]({eq_file.name})",
+        "",
+        "> **判读口径**：请以「日超额 / t」为准，不要只看净值高低。净值同时受**区间选择**与"
+        "**波动拖累**影响（日波动越大，同样的日均收益复利越差）。",
+        "> 实测同一策略在全区间跑输基准 12.8pp、在近一年跑赢 24.6pp，而两个区间的日度超额 t 都不显著 —— "
+        "净值曲线本身**不能**替代显著性检验。",
+        "",
+        "| 曲线 | 交易日 | 累计 | 年化 | 最大回撤 | Sharpe | 日超额 | t |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+
+    def _p(v, pct=False, digits=2):
+        if v is None or (isinstance(v, float) and v != v):
+            return "-"
+        return f"{v * 100:+.{digits}f}%" if pct else f"{v:.{digits}f}"
+
+    for c in curves:
+        s, e = c.stats(), c.excess or {}
+        lines.append(
+            f"| {c.name} | {s.get('days', '-')} | {_p(s.get('total'), True)} "
+            f"| {_p(s.get('annual'), True)} | {_p(s.get('max_dd'), True)} "
+            f"| {_p(s.get('sharpe'))} | {_p(e.get('mean'), True, 3)} | {_p(e.get('t'))} |"
+        )
+    lines += ["", "口径：" + "；".join(f"{c.name} = {c.note}" for c in curves if c.note) + "。", "",
+              "### 校准曲线（评分分档 → 实际超额收益）", ""]
+    for tag, cal, label in (("主链路（观察池）", cal_main, "final_score 分位"),
+                            ("影子信号（决策依据）", cal_shadow, "signal_score 分位")):
+        svg = charts.render_calibration_svg(cal, label=label,
+                                           title=f"校准曲线 · {tag} · {label} → 实际超额")
+        f = out_dir / f"backtest_{run_id}_calib_{'main' if '主链路' in tag else 'shadow'}.svg"
+        f.write_text(svg, encoding="utf-8")
+        paths["calib_svg" if "main" in f.name else "calib_shadow_svg"] = str(f)
+        lines += [f"![{tag} 校准曲线]({f.name})", ""]
+
+    html = charts.render_equity_html(
+        curves,
+        {"主链路（观察池）": cal_main, "影子信号（决策依据）": cal_shadow},
+        subtitle=f"{span} · 各自原生口径 · 扣双边 0.3% 成本",
+    )
+    html_file = out_dir / f"backtest_{run_id}.html"
+    html_file.write_text(html, encoding="utf-8")
+    paths["html"] = str(html_file)
+    lines += [f"**交互版**（可拖拽框选区间放大、悬停查看每日数值）：`{html_file.name}`", ""]
+    return "\n".join(lines), paths
+
+
 def save(stats: dict[str, Any]) -> dict[str, str]:
     """保存 Markdown 报告与明细 CSV。"""
     cfg = get_config()
@@ -302,10 +377,18 @@ def save(stats: dict[str, Any]) -> dict[str, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     run_id = stats.get("run_id", datetime.now().strftime("%Y%m%d_%H%M%S"))
 
-    md_path = out_dir / f"backtest_{run_id}.md"
-    md_path.write_text(render(stats), encoding="utf-8")
+    md = render(stats)
+    paths: dict[str, str] = {}
+    try:
+        extra, curve_paths = _build_charts(run_id, out_dir)
+        md = md + extra
+        paths.update(curve_paths)
+    except Exception as exc:  # noqa: BLE001 - 图失败不能影响报告本体
+        logger.warning("净值曲线生成失败（报告本体不受影响）：%s", str(exc)[:160])
 
-    paths = {"markdown": str(md_path)}
+    md_path = out_dir / f"backtest_{run_id}.md"
+    md_path.write_text(md, encoding="utf-8")
+    paths["markdown"] = str(md_path)
     detail: pd.DataFrame = stats.get("detail")
     if detail is not None and not detail.empty:
         csv_path = out_dir / f"backtest_{run_id}.csv"
