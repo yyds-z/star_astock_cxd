@@ -259,6 +259,265 @@ def review_run() -> dict[str, Any]:
     }
 
 
+# ---------------- 影子信号（v1.0 决策依据）----------------
+# 此前 serving 里完全没有这张表的数据 —— 页面上只能看到"观察池"（主链路），
+# 看不到真正要执行的名单。这三个端点补上这个缺口。
+_ZT_CAP = {"30": 19.5, "68": 19.5}  # 创业板/科创板 20cm
+
+
+def _shadow_status(code: str, pct: float | None) -> str:
+    """按快照涨幅判定可执行性（与每日报告使用**同一套**分类口径）。"""
+    if pct is None:
+        return "无快照"
+    cap = _ZT_CAP.get(str(code)[:2], 9.7)
+    if pct >= cap:
+        return "已涨停·放弃"
+    if pct >= 7.0:
+        return "涨幅过大·回避"
+    return "可买"
+
+
+@app.get("/api/shadow/latest")
+def shadow_latest(offset: int = Query(0, ge=0, le=60)) -> dict[str, Any]:
+    """最新信号日的影子候选；若计划交易日已有盘中快照，附带"此刻能不能买"的实况。"""
+    _need_snapshot()
+    reader = get_reader()
+    dates = reader.records(
+        "SELECT DISTINCT CAST(date AS VARCHAR) AS date FROM shadow ORDER BY date DESC LIMIT ?",
+        "shadow",
+        [offset + 1],
+    )
+    if len(dates) <= offset:
+        return {"available": False, "records": [], "hint": "尚无影子信号：需先跑 daily（含 shadow build）"}
+
+    sig_date = str(dates[offset]["date"])[:10]
+    rows = reader.records(
+        "SELECT code, name, close AS sig_close, zt20, days_since_zt, vol_ratio, signal_score "
+        "FROM shadow WHERE CAST(date AS VARCHAR) = ? ORDER BY signal_score DESC",
+        "shadow",
+        [sig_date],
+    )
+
+    # 盘中实况：**只有快照日期晚于信号日**才关联。
+    # 若不过滤，会把几天前那份快照的价格当成"现价"显示 —— 那是主动误导，
+    # 比不给实况更糟（本项目的核心教训之一就是"口径不对等于没有数据"）。
+    snap_date, slots = None, []
+    snap = reader.records(
+        "SELECT DISTINCT CAST(date AS VARCHAR) AS date, slot FROM intraday "
+        "ORDER BY date DESC, slot DESC LIMIT 6",
+        "intraday",
+    )
+    fresh = [s for s in snap if str(s["date"])[:10] > sig_date]
+    if fresh:
+        snap_date = str(fresh[0]["date"])[:10]
+        slots = sorted({s["slot"] for s in fresh if str(s["date"])[:10] == snap_date}, reverse=True)
+    live: dict[str, dict] = {}
+    if snap_date and slots:
+        for r in reader.records(
+            "SELECT code, price, pct_chg, volume_ratio, CAST(captured_at AS VARCHAR) AS captured_at "
+            "FROM intraday WHERE CAST(date AS VARCHAR) = ? AND slot = ?",
+            "intraday",
+            [snap_date, slots[0]],
+        ):
+            live[r["code"]] = r
+
+    for r in rows:
+        q = live.get(r["code"])
+        r["snap_price"] = q.get("price") if q else None
+        r["snap_pct"] = q.get("pct_chg") if q else None
+        r["snap_volume_ratio"] = q.get("volume_ratio") if q else None
+        r["status"] = _shadow_status(r["code"], r["snap_pct"] if q else None)
+
+    order = {"可买": 0, "涨幅过大·回避": 1, "已涨停·放弃": 2, "无快照": 3}
+    rows.sort(key=lambda r: (order.get(r["status"], 9), -(r.get("signal_score") or 0)))
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {
+        "available": True,
+        "signal_date": sig_date,
+        "snapshot_date": snap_date,
+        "snapshot_slot": slots[0] if slots else None,
+        "count": len(rows),
+        "status_counts": counts,
+        "records": rows,
+        "rules": [
+            "等权分散（收益来自约 9% 命中涨停的尾部，靠分散才成为正期望）",
+            "市价买入、不追板；已涨停的放弃",
+            "持有 D+1 / D+3 收盘，不因盘中波动提前割",
+        ],
+    }
+
+
+@app.get("/api/shadow/history")
+def shadow_history(days: int = Query(60, ge=2, le=400)) -> dict[str, Any]:
+    """按信号日聚合的影子成绩：笔数、次日收益、超额、命中涨停、结算情况。"""
+    _need_snapshot()
+    reader = get_reader()
+    # INTERVAL 不接受绑定参数（实测报错），days 已由 FastAPI 限定为 2~400 的整数，可安全内联
+    rows = reader.records(
+        f"""
+        SELECT CAST(date AS VARCHAR) AS date,
+               COUNT(*) AS n,
+               COUNT(ret1) AS settled,
+               ROUND(AVG(ret1), 3) AS avg_ret1,
+               ROUND(AVG(ret3), 3) AS avg_ret3,
+               ROUND(AVG(excess), 3) AS avg_excess,
+               SUM(CASE WHEN hit_limit_up THEN 1 ELSE 0 END) AS hit_zt
+        FROM shadow
+        WHERE date >= (SELECT MAX(date) FROM shadow) - INTERVAL {int(days)} DAY
+        GROUP BY date ORDER BY date DESC
+        """,
+        "shadow",
+    )
+    settled = [r for r in rows if r.get("settled")]
+    if settled:
+        import statistics
+
+        ex = [r["avg_excess"] for r in settled if r.get("avg_excess") is not None]
+        mean = statistics.fmean(ex) if ex else None
+        t = None
+        if len(ex) > 2:
+            sd = statistics.stdev(ex)
+            t = round(mean / (sd / len(ex) ** 0.5), 2) if sd else None
+        agg = {
+            "days": len(settled),
+            "mean_excess": round(mean, 3) if mean is not None else None,
+            "t": t,
+            "hit_zt": sum(int(r.get("hit_zt") or 0) for r in settled),
+        }
+    else:
+        agg = {"days": 0, "mean_excess": None, "t": None, "hit_zt": 0}
+    return {"records": rows, "aggregate": agg}
+
+
+# ---------------- 曲线（净值 / 校准）----------------
+@app.get("/api/equity")
+def equity(include_benchmark: bool = Query(True)) -> dict[str, Any]:
+    """三条净值曲线 + 绩效/显著性指标，**全部从 Parquet 快照计算**（不碰主库）。
+
+    与回测报告用同一套口径与统计（复用 `astock.backtest.charts`），
+    否则"页面上的结论"和"报告里的结论"会不一致。
+    """
+    _need_snapshot()
+    from astock.backtest import charts
+
+    reader = get_reader()
+    curves: list[charts.Curve] = []
+    run_id = None
+
+    df = reader.query("SELECT d, r, run_id FROM backtest_daily ORDER BY d", "backtest_daily")
+    if not df.empty:
+        run_id = str(df["run_id"].iloc[0])
+        s = pd.Series((df["r"] / 100.0 - charts.COST_ROUND_TRIP).to_numpy(),
+                      index=df["d"].astype(str).tolist())
+        curves.append(charts.curve_from_series(
+            s, "主链路（观察池）", charts.C_MAIN, "次日开盘买→再次日收盘卖，扣0.3%"))
+
+    df = reader.query(
+        "SELECT CAST(date AS VARCHAR) AS d, AVG(ret1) AS r FROM shadow "
+        "WHERE ret1 IS NOT NULL GROUP BY date ORDER BY date", "shadow")
+    if not df.empty:
+        s = pd.Series((df["r"] / 100.0 - charts.COST_ROUND_TRIP).to_numpy(),
+                      index=df["d"].astype(str).tolist())
+        curves.append(charts.curve_from_series(
+            s, "影子信号（决策依据）", charts.C_SHADOW, "信号日收盘买→次日收盘卖，扣0.3%"))
+
+    if include_benchmark:
+        # 基准 = 同池等权、与主链路同口径（用 stock_bars + dim_stock 两张快照算）。
+        # ⚠️ 依赖 stock_bars 的快照天数（默认 250 个交易日）：若将来影子历史长于它，
+        # 基准会先把窗口截短，导致「页面窗口 < 报告窗口」。届时把
+        # `serving.export(bars_days=...)` 调大即可（当前 250 > 影子 239，安全）。
+        bdf = reader.query_tables(
+            """
+            WITH pool AS (SELECT code, out_date, ipo_date, board, name FROM dim_stock),
+            fwd AS (
+                SELECT b.date,
+                       (LEAD(b.close, 2) OVER (PARTITION BY b.code ORDER BY b.date)
+                        / NULLIF(LEAD(b.open, 1) OVER (PARTITION BY b.code ORDER BY b.date), 0)
+                        - 1) * 100 AS r
+                FROM stock_bars b JOIN pool p ON p.code = b.code
+                WHERE p.board IN ('main', 'gem') AND p.name NOT LIKE '%ST%'
+                  AND (p.out_date IS NULL OR p.out_date > b.date)
+                  AND p.ipo_date <= b.date - INTERVAL 120 DAY
+            )
+            SELECT CAST(date AS VARCHAR) AS d, AVG(r) AS r
+            FROM fwd WHERE r IS NOT NULL AND r > -50 AND r < 50
+            GROUP BY date ORDER BY date
+            """,
+            ("stock_bars", "dim_stock"),
+        )
+        if not bdf.empty:
+            s = pd.Series((bdf["r"] / 100.0 - charts.COST_ROUND_TRIP).to_numpy(),
+                          index=bdf["d"].astype(str).tolist())
+            curves.append(charts.curve_from_series(
+                s, "基准（同池等权）", charts.C_BENCH, "同一可交易池等权，同口径，扣0.3%",
+                dashed=True))
+
+    curves = list(charts.attach_excess(curves))
+    if not curves:
+        return {"available": False, "dates": [], "curves": []}
+    dates = curves[0].dates
+    return {
+        "available": True,
+        "run_id": run_id,
+        "dates": dates,
+        "span": [dates[0], dates[-1]] if dates else [None, None],
+        "judgement": "判据看「日超额 / t」，不要只看净值高低：净值受区间选择与波动拖累影响。",
+        "curves": [
+            {
+                "name": c.name,
+                "color": c.color,
+                "dashed": c.dashed,
+                "note": c.note,
+                "nav": [round(v, 5) for v in c.nav],
+                "stats": {k: (round(v, 6) if isinstance(v, float) else v)
+                          for k, v in c.stats().items()},
+                "excess": {k: round(v, 6) for k, v in (c.excess or {}).items()},
+            }
+            for c in curves
+        ],
+    }
+
+
+@app.get("/api/calibration")
+def calibration(bins: int = Query(10, ge=3, le=20)) -> dict[str, Any]:
+    """校准曲线：评分分档 → 该档实际超额收益。回答"高分是否真的涨得多"。"""
+    _need_snapshot()
+    reader = get_reader()
+
+    def calc(df: pd.DataFrame, label: str) -> dict[str, Any]:
+        if df is None or df.empty or df["score"].notna().sum() < bins * 5:
+            return {"title": label, "labels": [], "excess": [], "n": []}
+        d = df.dropna(subset=["score", "ret"]).copy()
+        try:
+            d["bin"] = pd.qcut(d["score"], bins, labels=False, duplicates="drop")
+        except ValueError:
+            return {"title": label, "labels": [], "excess": [], "n": []}
+        g = d.groupby("bin").agg(n=("ret", "size"), ret=("ret", "mean"))
+        g["excess"] = g["ret"] - d["ret"].mean()
+        return {
+            "title": label,
+            "labels": [f"Q{i + 1}" for i in range(len(g))],
+            "excess": [round(float(v), 4) for v in g["excess"]],
+            "n": [int(v) for v in g["n"]],
+        }
+
+    main = reader.query_tables(
+        "SELECT final_score AS score, ret_exit_d1c AS ret FROM backtest_scores",
+        ("backtest_scores",),
+    )
+    shadow = reader.query("SELECT signal_score AS score, ret1 AS ret FROM shadow "
+                          "WHERE ret1 IS NOT NULL", "shadow")
+    return {
+        "groups": [
+            calc(main, "主链路（观察池）· final_score 分位"),
+            calc(shadow, "影子信号（决策依据）· signal_score 分位"),
+        ],
+        "hint": "纵轴为该分位相对全样本均值的超额收益；若评分有排序能力，曲线应自左向右单调上升。",
+    }
+
+
 # ---------------- 个股 ----------------
 @app.get("/api/stock/{code}")
 def stock_detail(code: str, days: int = Query(180, ge=20, le=1000)) -> dict[str, Any]:

@@ -108,6 +108,52 @@ def _compound(daily: pd.Series) -> Curve:
     return Curve(name="", dates=[str(d) for d in daily.index], nav=nav, daily=daily)
 
 
+def curve_from_series(daily: pd.Series, name: str, color: str,
+                      note: str = "", dashed: bool = False) -> Curve:
+    """从「日收益序列」构造曲线（**纯函数，不碰数据库**）。
+
+    为什么单独抽出：展示层（FastAPI）只允许读 Parquet 快照、绝不能打开主库
+    （DuckDB 独占锁会让 daily 无法运行），所以它需要一条不依赖 Storage 的构造路径，
+    但它与报告必须用**完全相同的口径与统计**，否则页面上和报告里会给出两个答案。
+    """
+    c = _compound(daily)
+    c.name, c.color, c.note, c.dashed = name, color, note, dashed
+    return c
+
+
+def attach_excess(curves: Sequence[Curve],
+                  benchmark_keyword: str = "基准") -> Sequence[Curve]:
+    """给各曲线附加相对基准的「日度超额 + 聚类 t」，并把所有曲线对齐到共同日期。
+
+    两条用途合一：① 对齐（长度不齐的曲线画在一起会错位）；
+    ② 显著性（净值高低会骗人，日超额/t 才是判据）。
+    """
+    curves = [c for c in curves if c.daily is not None and not c.daily.empty]
+    if not curves:
+        return []
+    common = sorted(set.intersection(*[set(c.daily.index) for c in curves]))
+    if not common:
+        return list(curves)
+    out: list[Curve] = []
+    for c in curves:
+        sub = c.daily.reindex(common).dropna()
+        fixed = curve_from_series(sub, c.name, c.color, c.note, c.dashed)
+        out.append(fixed)
+    base = next((c for c in out if benchmark_keyword in c.name), None)
+    if base is not None:
+        for c in out:
+            if c is base:
+                continue
+            d = (c.daily - base.daily).dropna()
+            if len(d) > 2 and d.std(ddof=1):
+                c.excess = {
+                    "mean": float(d.mean()),
+                    "t": float(d.mean() / (d.std(ddof=1) / math.sqrt(len(d)))),
+                    "days": float(len(d)),
+                }
+    return out
+
+
 def load_main_equity(storage: Storage, run_id: str) -> Curve:
     """主链路净值：按 `data_date` 等权合并当日 15 只，口径 = 次日开盘买→再次日收盘卖。
 
@@ -206,35 +252,12 @@ def build_curves(storage: Storage | None = None, run_id: str | None = None,
     shadow = load_shadow_equity(st, start, end)
     bench = load_benchmark(st, start, end)
 
-    # 共同区间 = 三方日期交集（影子受涨停数据限制通常最短）
-    sets = [set(c.dates) for c in (main, shadow, bench) if c.dates]
-    common = sorted(set.intersection(*sets)) if sets else []
-    if common:
-        lo, hi = common[0], common[-1]
-        out: list[Curve] = []
-        for c in (shadow, main, bench):
-            sub = c.daily.reindex(common).dropna() if c.daily is not None else None
-            if sub is None or sub.empty:
-                continue
-            fixed = _compound(sub)
-            fixed.name, fixed.color, fixed.dashed, fixed.note = c.name, c.color, c.dashed, c.note
-            out.append(fixed)
-        # 相对基准的日度超额 + 聚类 t（t 用日度序列算，避免把日内相关性当成独立样本）
-        base = next((c for c in out if "基准" in c.name), None)
-        if base is not None and base.daily is not None:
-            for c in out:
-                if c is base or c.daily is None:
-                    continue
-                d = (c.daily - base.daily.reindex(c.daily.index)).dropna()
-                if len(d) > 2 and d.std(ddof=1):
-                    c.excess = {
-                        "mean": float(d.mean()),
-                        "t": float(d.mean() / (d.std(ddof=1) / math.sqrt(len(d)))),
-                        "days": float(len(d)),
-                    }
-        logger.info("曲线区间对齐：%s ~ %s（共同 %d 个交易日，run_id=%s）", lo, hi, len(common), run_id)
-        return out
-    return [c for c in (shadow, main, bench) if c.dates]
+    # 对齐到共同日期 + 计算相对基准的日度超额与 t（与展示层共用同一实现）
+    out = attach_excess([shadow, main, bench])
+    if out and out[0].dates:
+        logger.info("曲线区间对齐：%s ~ %s（共同 %d 个交易日，run_id=%s）",
+                    out[0].dates[0], out[0].dates[-1], len(out[0].dates), run_id)
+    return list(out)
 
 
 # ============================================================

@@ -18,7 +18,7 @@ import json
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import duckdb
 import pandas as pd
@@ -65,6 +65,40 @@ SNAPSHOT_QUERIES: dict[str, str] = {
         ORDER BY date DESC, source, strength_score DESC
     """,
     "llm_usage": "SELECT * FROM sys_llm_usage ORDER BY date DESC LIMIT 30",
+    # ---- v1.0 决策依据：影子信号（此前**完全没有**导出，导致网页上看不到真正的名单）----
+    # **全量导出**（约 9.4 千行，不足 1 MB）。为什么不截断：
+    # 净值曲线的窗口长度直接决定结论 —— 实测截到 180 个日历日后只剩 110 个交易日，
+    # 该窗口内"主链路 +24.6% > 影子 +12.4%"；而完整 239 个交易日里
+    # "影子 +146% ≫ 主链路 -17.6%"。截断会把页面变成一个误导工具。
+    "shadow": """
+        SELECT * FROM ads_shadow_pick ORDER BY date DESC, signal_score DESC
+    """,
+    # 盘中快照：只导最新一天（用于给影子候选标注"此刻能不能买"），体积可控
+    "intraday": """
+        SELECT * FROM dwd_intraday_snapshot
+        WHERE date = (SELECT MAX(date) FROM dwd_intraday_snapshot)
+    """,
+    # ---- 主链路净值：按数据日的可实现收益（回测明细 → 聚合成 ~490 行）----
+    # 取**区间最长**的轮次而不是最新轮次：净值曲线需要足够长的窗口才有意义，
+    # 样本短（如 2 个月）时结论会随区间翻转 —— 实测同一策略全区间跑输基准
+    # 12.8pp、近一年跑赢 24.6pp。轮次 id 一并导出，供前端标注数据来源。
+    "backtest_daily": """
+        SELECT run_id, CAST(data_date AS VARCHAR) AS d, AVG(ret_exit_d1c) AS r, COUNT(*) AS n
+        FROM ads_backtest
+        WHERE ret_exit_d1c IS NOT NULL AND run_id = (
+            SELECT run_id FROM ads_backtest GROUP BY run_id
+            ORDER BY COUNT(DISTINCT data_date) DESC, run_id DESC LIMIT 1
+        )
+        GROUP BY run_id, data_date ORDER BY data_date
+    """,
+    # ---- 校准曲线原始点（分数 + 可实现收益），同一轮次、只留两列 ----
+    "backtest_scores": """
+        SELECT final_score, ret_exit_d1c FROM ads_backtest
+        WHERE ret_exit_d1c IS NOT NULL AND final_score IS NOT NULL AND run_id = (
+            SELECT run_id FROM ads_backtest GROUP BY run_id
+            ORDER BY COUNT(DISTINCT data_date) DESC, run_id DESC LIMIT 1
+        )
+    """,
 }
 
 
@@ -125,6 +159,25 @@ def export(storage: Storage | None = None, bars_days: int = 250) -> dict[str, An
             storage.query_value("SELECT COUNT(DISTINCT rec_date) FROM ads_recommend", default=0) or 0
         ),
         "review_rows": int(storage.table_count("ads_review")),
+        # ---- v1.0 契约的三项验收指标（G1/G2/G3），前端顶部看板直接读这里 ----
+        # G1：影子信号每日产出且被结算 —— 信号日数与最新信号日
+        "shadow_rows": int(storage.table_count("ads_shadow_pick")),
+        "shadow_days": int(
+            storage.query_value("SELECT COUNT(DISTINCT date) FROM ads_shadow_pick", default=0) or 0
+        ),
+        "shadow_latest_date": _as_str(
+            storage.query_value("SELECT MAX(date) FROM ads_shadow_pick", default=None)
+        ),
+        # G2：盘中快照积累（目标 ≥60 个交易日）
+        "snapshot_days": int(
+            storage.query_value(
+                "SELECT COUNT(DISTINCT date) FROM dwd_intraday_snapshot", default=0
+            )
+            or 0
+        ),
+        "snapshot_latest_date": _as_str(
+            storage.query_value("SELECT MAX(date) FROM dwd_intraday_snapshot", default=None)
+        ),
     }
 
     meta = {
@@ -241,6 +294,17 @@ class ServingReader:
     def query(self, sql: str, table: str, params: list[Any] | None = None) -> pd.DataFrame:
         """执行查询；若所需快照表不存在则返回空 DataFrame。"""
         if not self._ensure_view(table):
+            return pd.DataFrame()
+        return self.con.execute(sql, params or []).df()
+
+    def ensure(self, *tables: str) -> bool:
+        """确保若干张快照视图都已注册（多表 JOIN 的 SQL 需要）。"""
+        return all(self._ensure_view(t) for t in tables)
+
+    def query_tables(self, sql: str, tables: Sequence[str],
+                     params: list[Any] | None = None) -> pd.DataFrame:
+        """多表查询：任一快照缺失即返回空表（而不是抛错，展示层应"缺数据不报错"）。"""
+        if not self.ensure(*tables):
             return pd.DataFrame()
         return self.con.execute(sql, params or []).df()
 
