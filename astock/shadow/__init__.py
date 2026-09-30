@@ -10,6 +10,6 @@ A 股 T+1 下不可实现，实测可实现口径下超额归零、D+5 显著为
 所以这里的东西只做三件事：**落库、结算、统计**，不参与选股。
 """
 
-from astock.shadow.limit_gene import LimitGeneShadow
+from astock.shadow.limit_gene import LimitGeneShadow, shadow_min_signal_score
 
-__all__ = ["LimitGeneShadow"]
+__all__ = ["LimitGeneShadow", "shadow_min_signal_score"]

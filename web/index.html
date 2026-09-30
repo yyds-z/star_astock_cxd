@@ -104,10 +104,9 @@
       <span class="tag ok">v1.0 决策依据</span>
       <span class="tag" id="deskDate">—</span>
     </h2>
-    <div class="muted" style="font-size:12px;margin-bottom:12px;">
-      逻辑：涨停基因（近 28 日有涨停且距上次 ≤10 天）+ 缩量（量 &lt; 前 5 日均量 70%）+ 不破位。
-      检验：次日涨停率 9.2%（全市场 2.05%），可实现超额 +0.667%/日（观察期选参 → 验证期 t=3.56）。
-    </div>
+    <!-- 规则文字由接口渲染（阈值来自配置的同一读取点），避免配置改了、
+         页面还写着旧阈值 —— 本项目最贵的错误类型就是"两个来源两个答案"。 -->
+    <div class="muted" id="deskLogic" style="font-size:12px;margin-bottom:12px;">加载中…</div>
     <div class="cards" id="deskKpi"></div>
     <div class="rules" id="deskRules"></div>
     <div class="tabs" id="shadowTabs"></div>
@@ -516,7 +515,8 @@ function renderDeskKpi(d, h, st, mk){
   const items = [
     [hasSnap ? "可执行（已核对实况）" : "本信号日候选（无盘中快照）",
      hasSnap ? (counts["可买"] ?? 0) : ((d && d.count) || 0),
-     hasSnap ? `只 / 共 ${(d && d.count) || 0}` : "只"],
+     hasSnap ? `只 / 共 ${(d && d.count) || 0}`
+             : `只（另过滤 ${(d && d.filtered_out) || 0}）`],
     ["已结算日数", agg.days ?? 0, "日"],
     ["日均超额", ex==null ? "-" : ((ex>0?"+":"")+Number(ex).toFixed(3)), "%"],
     ["显著性 t", t==null ? "-" : t, t!=null && t>=2 ? "达标" : "未达标"],
@@ -543,6 +543,13 @@ function renderShadow(d){
     `信号日 ${d.signal_date}` + (d.snapshot_date
       ? `　实况 ${d.snapshot_date} ${d.snapshot_slot || ""}` : "　（该日尚无盘中快照，仅信号）");
   rules.innerHTML = (d.rules || []).map(r => `<span>${r}</span>`).join("");
+  const ms = d.min_signal_score;
+  document.getElementById("deskLogic").innerHTML =
+    `逻辑：涨停基因（近 28 日有涨停且距上次 ≤10 天）`
+    + `+ 缩量（量 &lt; 前 5 日均量 ${(100 - ms)}%，即 <b>信号分 ≥ ${ms}</b>，低于此分不推荐）`
+    + `+ 不破位。　检验（2026-09-30 修订后，观察期选参 → 验证期检验）：`
+    + `验证期日均超额 <b>+1.258%</b>、t=<b>3.88</b>、次日涨停率 23.6%。`
+    + `<br>⚠️ 修订代价：每日候选从 ~36 只降到 ~9 只，分散度下降（单只权重 1/36 → 1/9）。`;
 
   const counts = d.status_counts || {};
   const states = Object.keys(counts);
@@ -571,7 +578,9 @@ function renderShadow(d){
       <td class="${SHADOW_CLS[r.status]||""}">${r.status}</td></tr>`).join("");
   box.innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>
     <div class="muted" style="font-size:12px;margin-top:8px;">
-      共 ${rows.length} 只 · 信号分只是<b>缩量程度排序</b>，不是胜率排序 —— 请等权分散持有，不要重仓前几名。
+      共 ${rows.length} 只（信号日全量 ${d.count + (d.filtered_out || 0)} 只，`
+    + `其中 ${d.filtered_out || 0} 只因信号分 &lt; ${d.min_signal_score} 被过滤）· `
+    + `信号分是<b>缩量程度</b>，不是胜率排序 —— 请等权分散持有，不要重仓前几名。
     </div>`;
 }
 
@@ -676,7 +685,9 @@ async function loadEquity(){
         <td class="num ${x.t!=null && Math.abs(x.t)>=2 ? "up":"muted"}">${fmt(x.t,2)}</td>
         <td class="num">${s.days ?? "-"}</td></tr>`;
     }).join("")}</tbody></table>
-    <div class="muted" style="font-size:12px;margin-top:8px;">${d.judgement||""}</div>`;
+    <div class="muted" style="font-size:12px;margin-top:8px;">${d.judgement||""}</div>
+    ${d.caveat?`<div class="muted" style="font-size:12px;margin-top:6px;
+        border-left:3px solid #d2992266;padding-left:8px;">${d.caveat}</div>`:""}`;
 }
 
 async function loadCalibration(){

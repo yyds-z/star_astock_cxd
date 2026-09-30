@@ -265,6 +265,18 @@ def review_run() -> dict[str, Any]:
 _ZT_CAP = {"30": 19.5, "68": 19.5}  # 创业板/科创板 20cm
 
 
+def _shadow_min_score() -> float:
+    """影子模块的「信号分下限」（低于它不推荐）。
+
+    直接调用引擎侧的实现（`astock.shadow.shadow_min_signal_score`）——
+    展示层**绝不重新实现**口径判断：一旦这里写死 50，改配置就只会改到引擎，
+    页面仍在展示已被淘汰的名单。
+    """
+    from astock.shadow import shadow_min_signal_score
+
+    return shadow_min_signal_score()
+
+
 def _shadow_status(code: str, pct: float | None) -> str:
     """按快照涨幅判定可执行性（与每日报告使用**同一套**分类口径）。"""
     if pct is None:
@@ -291,12 +303,18 @@ def shadow_latest(offset: int = Query(0, ge=0, le=60)) -> dict[str, Any]:
         return {"available": False, "records": [], "hint": "尚无影子信号：需先跑 daily（含 shadow build）"}
 
     sig_date = str(dates[offset]["date"])[:10]
+    min_score = _shadow_min_score()
     rows = reader.records(
         "SELECT code, name, close AS sig_close, zt20, days_since_zt, vol_ratio, signal_score "
-        "FROM shadow WHERE CAST(date AS VARCHAR) = ? ORDER BY signal_score DESC",
+        "FROM shadow WHERE CAST(date AS VARCHAR) = ? AND signal_score >= ? "
+        "ORDER BY signal_score DESC",
         "shadow",
-        [sig_date],
+        [sig_date, min_score],
     )
+    # 被规则挡掉的数量也要说出来：否则用户看到"31 只变 9 只"会以为数据丢了
+    dropped = int(reader.scalar(
+        "SELECT COUNT(*) FROM shadow WHERE CAST(date AS VARCHAR) = ? AND signal_score < ?",
+        "shadow", [sig_date, min_score], default=0) or 0)
 
     # 盘中实况：**只有快照日期晚于信号日**才关联。
     # 若不过滤，会把几天前那份快照的价格当成"现价"显示 —— 那是主动误导，
@@ -340,9 +358,12 @@ def shadow_latest(offset: int = Query(0, ge=0, le=60)) -> dict[str, Any]:
         "snapshot_slot": slots[0] if slots else None,
         "count": len(rows),
         "status_counts": counts,
+        "min_signal_score": round(min_score, 1),
+        "filtered_out": dropped,
         "records": rows,
         "rules": [
-            "等权分散（收益来自约 9% 命中涨停的尾部，靠分散才成为正期望）",
+            f"信号分 < {min_score:g} 已过滤（缩量不够 = 抛压未枯竭）",
+            "等权分散（收益来自命中涨停的尾部，靠分散才成为正期望）",
             "市价买入、不追板；已涨停的放弃",
             "持有 D+1 / D+3 收盘，不因盘中波动提前割",
         ],
@@ -354,7 +375,11 @@ def shadow_history(days: int = Query(60, ge=2, le=400)) -> dict[str, Any]:
     """按信号日聚合的影子成绩：笔数、次日收益、超额、命中涨停、结算情况。"""
     _need_snapshot()
     reader = get_reader()
-    # INTERVAL 不接受绑定参数（实测报错），days 已由 FastAPI 限定为 2~400 的整数，可安全内联
+    # INTERVAL 不接受绑定参数（实测报错），days 已由 FastAPI 限定为 2~400 的整数，可安全内联。
+    # signal_score 过滤：成绩必须按**当前生效规则**统计。历史表里保留着阈值收紧前
+    # 写入的低分候选（信号分是逐行属性，不会被改写），若不过滤，
+    # 页面上显示的"日均超额/t"就是一条早已不再执行的规则的旧成绩。
+    min_score = _shadow_min_score()
     rows = reader.records(
         f"""
         SELECT CAST(date AS VARCHAR) AS date,
@@ -365,10 +390,11 @@ def shadow_history(days: int = Query(60, ge=2, le=400)) -> dict[str, Any]:
                ROUND(AVG(excess), 3) AS avg_excess,
                SUM(CASE WHEN hit_limit_up THEN 1 ELSE 0 END) AS hit_zt
         FROM shadow
-        WHERE date >= (SELECT MAX(date) FROM shadow) - INTERVAL {int(days)} DAY
+        WHERE signal_score >= ? AND date >= (SELECT MAX(date) FROM shadow) - INTERVAL {int(days)} DAY
         GROUP BY date ORDER BY date DESC
         """,
         "shadow",
+        [min_score],
     )
     settled = [r for r in rows if r.get("settled")]
     if settled:
@@ -414,14 +440,19 @@ def equity(include_benchmark: bool = Query(True)) -> dict[str, Any]:
         curves.append(charts.curve_from_series(
             s, "主链路（观察池）", charts.C_MAIN, "次日开盘买→再次日收盘卖，扣0.3%"))
 
+    # 影子曲线同样按当前阈值过滤：否则图上画的是旧规则的净值，
+    # 与页面顶部的"信号分 ≥ N"说明自相矛盾。
+    min_score = _shadow_min_score()
     df = reader.query(
         "SELECT CAST(date AS VARCHAR) AS d, AVG(ret1) AS r FROM shadow "
-        "WHERE ret1 IS NOT NULL GROUP BY date ORDER BY date", "shadow")
+        "WHERE ret1 IS NOT NULL AND signal_score >= ? GROUP BY date ORDER BY date",
+        "shadow", [min_score])
     if not df.empty:
         s = pd.Series((df["r"] / 100.0 - charts.COST_ROUND_TRIP).to_numpy(),
                       index=df["d"].astype(str).tolist())
         curves.append(charts.curve_from_series(
-            s, "影子信号（决策依据）", charts.C_SHADOW, "信号日收盘买→次日收盘卖，扣0.3%"))
+            s, "影子信号（决策依据）", charts.C_SHADOW,
+            f"信号日收盘买→次日收盘卖，扣0.3%；已按信号分 ≥ {min_score:g} 过滤"))
 
     if include_benchmark:
         # 基准 = 同池等权、与主链路同口径（用 stock_bars + dim_stock 两张快照算）。
@@ -464,6 +495,16 @@ def equity(include_benchmark: bool = Query(True)) -> dict[str, Any]:
         "dates": dates,
         "span": [dates[0], dates[-1]] if dates else [None, None],
         "judgement": "判据看「日超额 / t」，不要只看净值高低：净值受区间选择与波动拖累影响。",
+        # 影子曲线的阈值是在**同一段数据**上选出来的（2026-09-30 修订），
+        # 全区间数字因此含样本内选择偏差。不标注的话，页面上会出现
+        # "+3737%" 这种必然诱发过度自信的读数 —— 本项目的核心纪律就是
+        # "宁可说清局限，也不给一个看起来很好的数"。
+        "caveat": (
+            "⚠️ 影子曲线使用了在**同期数据**上选定的信号分阈值（在样本内），"
+            "全区间数字含选择偏差、不可直接外推。可信口径是验证期检验结果："
+            "（2026-04-03 起 122 个交易日）日均超额 +1.258%、t=3.88。"
+            "实际表现以 v1.0 上线后（2026-09-30 起）的纸面跟踪为准。"
+        ),
         "curves": [
             {
                 "name": c.name,
@@ -507,8 +548,10 @@ def calibration(bins: int = Query(10, ge=3, le=20)) -> dict[str, Any]:
         "SELECT final_score AS score, ret_exit_d1c AS ret FROM backtest_scores",
         ("backtest_scores",),
     )
-    shadow = reader.query("SELECT signal_score AS score, ret1 AS ret FROM shadow "
-                          "WHERE ret1 IS NOT NULL", "shadow")
+    shadow = reader.query(
+        "SELECT signal_score AS score, ret1 AS ret FROM shadow "
+        "WHERE ret1 IS NOT NULL AND signal_score >= ?",
+        "shadow", [_shadow_min_score()])
     return {
         "groups": [
             calc(main, "主链路（观察池）· final_score 分位"),

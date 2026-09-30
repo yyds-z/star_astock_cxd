@@ -47,6 +47,23 @@ logger = get_logger("shadow.limit_gene")
 _LOOKBACK_CALENDAR_DAYS = 20
 
 
+def shadow_min_signal_score() -> float:
+    """当前生效的「信号分下限」：低于它不推荐。
+
+    **配置的唯一读取点** —— 引擎（build）、报告（builder）、网页接口（api）全部
+    调用它，而不是各自读一次配置或各自写死一个数。本项目反复出现的失效模式就是
+    "同一口径存在两个来源"，最后两边给出两个答案且无人发现。
+
+    依据 `signal_score = (1 − vol_ratio) × 100`，故此值等价于缩量阈值
+    `vol_ratio_max = 1 − 分数/100`。
+    """
+    s = get_config().section("shadow_gene")
+    m = s.get("min_signal_score")
+    if m is not None:
+        return float(m)
+    return (1.0 - float(s.get("vol_ratio_max", 0.7))) * 100.0
+
+
 class LimitGeneShadow:
     """涨停基因影子模块。"""
 
@@ -57,14 +74,19 @@ class LimitGeneShadow:
         self.enabled = bool(s.get("enabled", True))
         self.zt_window = int(s.get("zt_window_days", 28))
         self.recent_days = int(s.get("recent_days", 10))
-        self.vol_max = float(s.get("vol_ratio_max", 0.7))
         self.ma5_min = float(s.get("vs_ma5_min", -0.02))
         self.max_picks = int(s.get("max_picks", 60))
+        # 缩量门槛：以「信号分下限」为准，**反推** vol_ratio_max（见模块级函数）。
+        self.min_signal_score = shadow_min_signal_score()
+        self.vol_max = 1.0 - self.min_signal_score / 100.0
 
     @property
     def _params(self) -> str:
+        """参数指纹，逐行落库。**必须随阈值变化而变** —— 它是 G3 验收时
+        区分"修订前/修订后"样本的唯一依据（否则两段样本会混在一起统计）。"""
         return (f"zt{self.zt_window}/recent{self.recent_days}"
-                f"/vol<{self.vol_max}/ma5>={self.ma5_min}")
+                f"/score>={self.min_signal_score:g}(vol<={self.vol_max:g})"
+                f"/ma5>={self.ma5_min}")
 
     # ---------------- 信号 ----------------
     def build(self, trade_date: date_cls | None = None, source: str = "daily") -> pd.DataFrame:

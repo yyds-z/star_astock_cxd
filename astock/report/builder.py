@@ -575,14 +575,22 @@ class ReportBuilder:
         每只候选会标注**此刻实况与可执行性**——这是「14:00 决策」的落地形式；
         18:30 生成报告时快照通常尚不存在，则只呈现信号本身。
         """
+        # 信号分下限（低于它不推荐）：与引擎**同一个读取点**，报告不自己实现口径。
+        from astock.shadow import shadow_min_signal_score
+
+        min_score = shadow_min_signal_score()
+        vol_max = 1.0 - min_score / 100.0
         lines: list[str] = [
             "## 二、影子信号候选（v1.0 决策依据）",
             "",
-            "> 逻辑：涨停基因（近 28 日有涨停、距上次 ≤10 天）+ 缩量（量 < 前 5 日均量 70%）"
-            "+ 不破位（收 ≥ 前 5 日均价 98%）。检验结论：次日涨停率 9.2%（全市场 2.05%）、"
-            "可实现超额 +0.667%/日（t=5.62，观察期选参→验证期 t=3.56）。",
-            "> 执行规则：**等权分散**（收益来自约 9% 命中涨停的尾部，靠分散变正期望）、"
+            f"> 逻辑：涨停基因（近 28 日有涨停、距上次 ≤10 天）+ 缩量（量 < 前 5 日均量 "
+            f"{vol_max:.0%}，即**信号分 ≥ {min_score:g}**，低于此分不推荐）"
+            "+ 不破位（收 ≥ 前 5 日均价 98%）。",
+            "> 检验结论（2026-09-30 修订后口径，观察期选参→验证期检验）："
+            "验证期日均超额 +1.258%、t=3.88、次日涨停率 23.6%。",
+            "> 执行规则：**等权分散**（收益来自约 1/4 命中涨停的尾部，靠分散变正期望）、"
             "市价买入不追板、持有 D+1/D+3 收盘。",
+            "> ⚠️ 修订代价：每日候选从 ~36 只降到 ~9 只，分散度下降，单只权重从 1/36 升到 1/9。",
             "",
         ]
         data_date = str(result.get("data_date"))
@@ -591,13 +599,20 @@ class ReportBuilder:
             picks = self.storage.query_df(
                 "SELECT code, name, close AS sig_close, zt20, days_since_zt, "
                 "vol_ratio, signal_score FROM ads_shadow_pick "
-                "WHERE date = ? ORDER BY signal_score DESC",
-                [data_date],
+                "WHERE date = ? AND signal_score >= ? ORDER BY signal_score DESC",
+                [data_date, min_score],
             )
+            dropped = int(self.storage.query_value(
+                "SELECT COUNT(*) FROM ads_shadow_pick WHERE date = ? AND signal_score < ?",
+                [data_date, min_score], default=0) or 0)
         except Exception:  # noqa: BLE001 - 表不存在等，报告不因影子失败而中断
             picks = pd.DataFrame()
+            dropped = 0
         if picks.empty:
-            lines.append(f"数据日 {data_date} 无影子候选（条件未命中或数据不足）。")
+            lines.append(
+                f"数据日 {data_date} 无影子候选（信号分 ≥ {min_score:g} 的标的一只都没有；"
+                f"另有 {dropped} 只因信号分不足被过滤）。"
+            )
             lines.append("")
             return lines
 
@@ -639,6 +654,7 @@ class ReportBuilder:
             lines.append(
                 f"信号日 {data_date} 共 **{len(picks)}** 只候选（计划 {plan_date} 买入）。"
                 f"按计划日快照核对：可买 **{n_buy}** 只、已涨停 {n_zt} 只（放弃）。"
+                f"另有 {dropped} 只因信号分 < {min_score:g} 被过滤。"
             )
             lines.append("")
             lines.append("| 代码 | 名称 | 信号分 | 信号日收盘 | 快照现价 | 快照涨幅 | 快照量比 | 信号量比 | 连板 | 距涨停(日) | 状态 |")
@@ -654,9 +670,12 @@ class ReportBuilder:
                     f"| {int(r['zt20'])} | {int(r['days_since_zt'])} | {r['状态']} |"
                 )
         else:
-            lines.append(f"信号日 {data_date} 共 **{len(picks)}** 只候选（计划 {plan_date} 买入）。")
+            lines.append(
+                f"信号日 {data_date} 共 **{len(picks)}** 只候选（计划 {plan_date} 买入，"
+                f"信号分 ≥ {min_score:g}；另有 {dropped} 只被过滤）。"
+            )
             lines.append("")
-            lines.append("| 代码 | 名称 | 信号分 | 信号日收盘 | 信号量比 | 连板 | 距涨停(日) |")
+            lines.append("| 代码 | 名称 | 信号分 | 信号日收盘 | 信号量比 | 连板 | 距上次涨停(日) |")
             lines.append("|---|---|---|---|---|---|---|")
             for _, r in picks.iterrows():
                 lines.append(
