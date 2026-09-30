@@ -100,8 +100,7 @@ class Storage:
     # 直接 DROP 重建是安全且省事的做法 —— 重建成本只是重跑一次计算，
     # 而放过结构不一致会留下难以排查的诡异错误。
     RECREATABLE_TABLES: set[str] = {
-        "dws_sector_strength", "dws_limit_factor", "dws_dragon_factor",
-        "dws_style_matrix",
+        "dws_sector_strength",
     }
 
     def init_schema(self) -> None:

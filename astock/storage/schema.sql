@@ -49,25 +49,12 @@ CREATE TABLE IF NOT EXISTS dim_stock_industry (
     PRIMARY KEY (code, source)
 );
 
--- 基本面补充（来源：申万成分接口附带返回）。
--- 注意：这是**接口顺手给的快照类数据**，不是严格意义的季度财报，
--- 用于价值档粗筛足够，但不能当作精确财务数据使用。
--- 字段可能为空（新股、亏损股），下游必须容忍 NULL。
-CREATE TABLE IF NOT EXISTS dim_stock_finance (
-    code             VARCHAR,
-    source           VARCHAR,
-    roe              DOUBLE,     -- ROE(%)
-    pe_ttm           DOUBLE,     -- 滚动市盈率
-    pb               DOUBLE,     -- 市净率
-    dividend_yield   DOUBLE,     -- 股息率(%)
-    profit_growth    DOUBLE,     -- 净利润增速(%)
-    revenue_growth   DOUBLE,     -- 营收增速(%)
-    updated_at       TIMESTAMP,
-    PRIMARY KEY (code, source)
-);
+-- 【已删除】dim_stock_finance（2026-09-30）
+-- 原为「申万成分接口顺手带的快照类基本面」（roe/pe/pb/增速），早已被
+-- 同花顺财务三表 → dws_finance_metrics 取代，纯冗余，因此连同表一并移除。
 
 -- ---------- 明细层：涨停/炸板池（来源：同花顺 Financial-API）----------
--- 这是短线情绪档的核心数据，免费源（akshare/adata/baostock）完全没有：
+-- 这是短线情绪档的核心数据，免费源（akshare）完全没有：
 -- 涨停题材、封单金额、连板高度、首次涨停时间都是打板策略的关键输入。
 -- 接口按交易日查询（date_ms），支持历史回填；限流 15 次/分钟，
 -- 因此只做每日一次的低频采集，绝不用于全市场行情。
@@ -131,28 +118,10 @@ CREATE TABLE IF NOT EXISTS dwd_dragon_tiger (
     PRIMARY KEY (date, code, range_days)
 );
 
--- ---------- 明细层：集合竞价（来源：同花顺 Financial-API）----------
--- 为什么不进每日自动流程：竞价数据**只在交易日 09:15~09:25 有意义**，
--- 且系统设计是「T+1 开盘买入」，所以它是盘中决策输入，由 `auction` 命令在盘前手动调用。
--- 只采候选股（约 15 只，1 次请求），不做全市场。
-CREATE TABLE IF NOT EXISTS dwd_auction (
-    date                    DATE,
-    code                    VARCHAR,
-    name                    VARCHAR,
-    auction_price           DOUBLE,   -- 竞价价格
-    auction_pct             DOUBLE,   -- 竞价涨跌幅(%)
-    auction_volume          DOUBLE,   -- 竞价成交量(**手**，1手=100股；上游口径，实测核对过)
-    auction_amount          DOUBLE,   -- 竞价成交额(元)
-    auction_unmatched       DOUBLE,   -- 未匹配量(**手**)：正=买盘剩余，负=卖盘剩余
-    auction_turnover_pct    DOUBLE,   -- 竞价换手率(%)
-    auction_yesterday_ratio_pct DOUBLE, -- 竞价量占昨日成交量比例(%)
-    auction_volume_ratio    DOUBLE,   -- 竞价量比
-    pre_close_price         DOUBLE,
-    open_price              DOUBLE,
-    float_market_cap        DOUBLE,
-    updated_at              TIMESTAMP,
-    PRIMARY KEY (date, code)
-);
+-- 【已删除】dwd_auction（2026-09-30）
+-- 集合竞价快照表自建库以来**从未写入过任何一行**（0 行），对应的 `auction` 命令
+-- 与同花顺 `auction/snapshot` 接口保留但表已移除 —— 决策链路从未读取它，
+-- 属零使用数据。若将来要做「竞价类影子信号」，按 git 历史还原本表定义即可。
 
 -- ---------- 汇总层：财务指标（来源：同花顺 Financial-API）----------
 -- 解决价值档「只有技术面、没有基本面」的问题：原价值档仅用 MA20>MA60>MA120
@@ -341,117 +310,15 @@ CREATE TABLE IF NOT EXISTS dws_sector_strength (
     PRIMARY KEY (date, source, industry_name)
 );
 
--- ---------- 汇总层：涨停因子宽表 ----------
--- 解决的问题：`dwd_limit_up`（连板/封单/题材）与 `dwd_daily_bar`（未来收益）
--- 分处两张表，无法回答最关键的问题 ——「这些字段到底能不能预测次日收益」。
--- 不回答它，新采的数据就只能当报告装饰，没资格进评分器。
--- 因此把「信号日可见的因子」与「信号日之后的收益」放进同一行，供 IC/分组检验。
---
--- 收益口径与全系统一致：信号日 T 收盘触发 → T+1 **开盘价买入**（T 日已涨停，买不到）。
---   open_premium = T+1 开盘 / T 收盘 - 1（打板者要付的溢价）
---   ret1         = T+1 收盘 / T+1 开盘 - 1（买入后当日收益）
--- 纯派生表：可由 dwd_limit_up + dwd_daily_bar + dws_sector_strength 全量重算。
-CREATE TABLE IF NOT EXISTS dws_limit_factor (
-    date             DATE,
-    code             VARCHAR,
-    boards           INTEGER,   -- 连板数（1=首板）
-    board_text       VARCHAR,   -- 连板文本（首板 / 4连板）
-    reason           VARCHAR,   -- 涨停题材
-    first_minutes    INTEGER,   -- 首次涨停距 09:30 的分钟数（09:25 一字板为 -5，越小越强）
-    is_new           BOOLEAN,   -- 未开板新股
-    is_st            BOOLEAN,
-    seal_money       DOUBLE,    -- 收盘封单额（元）
-    seal_ratio       DOUBLE,    -- 封单额 / 当日成交额
-    turn             DOUBLE,    -- 换手率(%)
-    amount           DOUBLE,    -- 成交额（元）
-    float_mv         DOUBLE,    -- 流通市值（元）
-    pct_5d           DOUBLE,    -- 前 5 日涨幅(%)
-    market_limit_up  INTEGER,   -- 当日全市场涨停家数
-    market_break     INTEGER,   -- 当日炸板家数
-    break_rate       DOUBLE,    -- 炸板率(%)
-    theme_heat       INTEGER,   -- 同题材当日涨停家数
-    sector_strength  DOUBLE,    -- 所属行业板块强度分
-    open_premium     DOUBLE,    -- 次日开盘溢价(%)
-    ret1             DOUBLE,    -- 买入后当日收益(%)
-    ret3             DOUBLE,    -- 持有至 T+3 收盘(%)
-    ret5             DOUBLE,    -- 持有至 T+5 收盘(%)
-    high1            DOUBLE,    -- T+1 最高 / T+1 开盘 - 1(%)
-    low1             DOUBLE,    -- T+1 最低 / T+1 开盘 - 1(%)
-    PRIMARY KEY (date, code)
-);
-
--- ---------- 汇总层：龙虎榜因子宽表 ----------
--- 目的：把「谁在买」从**展示信息**变成**可验证的因子**。
--- 现状：`dwd_dragon_tiger` 已采 243 天、约 1.9 万条，字段含机构净买入 / 游资净买入 /
--- 人气排名 —— 这是现有 8 条策略完全没有的维度（它们全是量价形态），
--- 但此前**只用于报告展示，从未进过评分或回测**。
---
--- 口径与 `dws_limit_factor` 一致：信号日 T 收盘后可见 → T+1 **开盘买入**，
--- 故 open_premium = T+1 开盘/T 收盘 − 1，ret1 = T+1 收盘/T+1 开盘 − 1。
---
--- 只以【当日榜】(range_days = 1) 为基行：3 日榜是另一套统计口径，
--- 混在一行里会让「当日净买入」的含义漂移；3 日榜的数据另以 `net_value_3d` 附上。
--- 纯派生表：可由 dwd_dragon_tiger + dwd_daily_bar + dws_sector_strength 全量重算。
-CREATE TABLE IF NOT EXISTS dws_dragon_factor (
-    date              DATE,
-    code              VARCHAR,
-    industry          VARCHAR,
-    net_value         DOUBLE,   -- 龙虎榜净买入（元）
-    net_rate          DOUBLE,   -- 净买入占比（小数）
-    org_net_value     DOUBLE,   -- 机构净买入（元）
-    hot_net_value     DOUBLE,   -- 游资净买入（元）
-    inst_share        DOUBLE,   -- 机构占多空双方合计的比例(%)，衡量「谁主导」
-    dominance         VARCHAR,  -- inst / youzi / both / diverge / none
-    org_buy_num       INTEGER,
-    org_sell_num      INTEGER,
-    hot_rank          INTEGER,  -- 同花顺人气排名（越小越热）
-    net_value_3d      DOUBLE,   -- 3 日榜净买入（无则 NULL）
-    limit_reason      VARCHAR,
-    list_cnt_5d       INTEGER,  -- 近 5 个**交易日**内上榜次数（含当日）
-    list_cnt_20d      INTEGER,
-    net_sum_5d        DOUBLE,   -- 近 5 个交易日累计净买入（元）
-    sector_list_cnt   INTEGER,  -- 同板块当日上榜家数
-    sector_net_sum    DOUBLE,   -- 同板块当日净买入合计（元）
-    sector_rank       INTEGER,  -- 本股在板块内按净买入排名（1 = 最高）
-    sector_strength   DOUBLE,   -- 所属板块强度分（0~100）
-    sector_limit_up   INTEGER,  -- 所属板块当日涨停家数
-    open_premium      DOUBLE,   -- 次日开盘溢价(%)
-    ret1              DOUBLE,   -- 买入后当日收益(%)
-    ret3              DOUBLE,   -- 持有至 T+3 收盘(%)
-    ret5              DOUBLE,   -- 持有至 T+5 收盘(%)
-    PRIMARY KEY (date, code)
-);
-
--- ---------- 汇总层：状态 × 规则 表现矩阵（自适应风格的依据）----------
--- 回答的问题：「这个市场状态下，哪条规则真的更好？」
--- 用途：为「状态 → 规则组合」的绑定提供有统计依据的初始值。
---
--- ⚠️ 为什么必须带 score_shrunk 而不是直接用格子均值：
---    6 个状态 × N 条规则 = 几十个格子，而短线档日均仅 2.1 只信号，
---    很多格子只有几十个样本 —— 直接按均值排序等于把噪声当规律。
---    收缩估计把格子均值往「该规则的全局均值」拉，样本越少拉得越狠。
---
--- ⚠️ 为什么带 t_stat：不只比均值大小，还要检验该规则在此状态下
---    与在其它状态下**是否有显著差异**（|t| ≥ 2）。否则随机波动会被
---    读成"这个状态适合这套打法"。
-CREATE TABLE IF NOT EXISTS dws_style_matrix (
-    run_id       VARCHAR,   -- 来源回测轮次
-    window_end   DATE,      -- 矩阵计算截止日（可追溯绑定是怎么变的）
-    state        VARCHAR,   -- 市场状态
-    rule         VARCHAR,   -- 规则名
-    n            INTEGER,   -- 该格子样本数
-    win_rate     DOUBLE,    -- 胜率(%)
-    avg_ret1     DOUBLE,    -- T+1 均值(%)
-    benchmark    DOUBLE,    -- 同期基准均值(%)，与 ret1 同口径(开→收)
-    excess       DOUBLE,    -- 超额(%)
-    score        DOUBLE,    -- 综合分 = 0.4×胜率分 + 0.6×超额分
-    score_global DOUBLE,    -- 该规则的全局综合分（收缩目标）
-    score_shrunk DOUBLE,    -- 收缩后分数（**真正用于排序的就是它**）
-    t_stat       DOUBLE,    -- 该状态 vs 该规则其它状态的 t 值
-    verdict      VARCHAR,   -- edge(显著更好) / bad(显著更差) / weak(不显著) / thin(样本不足)
-    PRIMARY KEY (run_id, state, rule)
-);
-
+-- 【已删除】研究产物三表（2026-09-30）
+--   dws_limit_factor   涨停因子宽表（18,701 行）
+--   dws_dragon_factor  龙虎榜因子宽表（13,189 行）
+--   dws_style_matrix   状态 × 规则表现矩阵（42 行）
+-- 依据：三者的研究结论已固化进 config/settings.yaml 与 config/data_registry.yaml
+-- 的注释，且**没有任何生产代码读取**（style_matrix 的 42 个格子中"显著更好"为 0，
+-- 状态级绑定无正向依据）。构建器模块（features/limit_factor.py、dragon_factor.py、
+-- market/style_matrix.py）与依赖它们的 entry_cost 过滤同批移除。
+-- 若将来解冻后要做新方向研究，按 git 历史还原本段即可。
 -- ---------- 应用层：复盘归因（LLM）----------
 -- 存「为什么赚/为什么亏」。没有它，策略迭代只能靠猜：
 -- 胜率下降时无法区分「市场环境变了」（调权重）与「选股逻辑失效」（改策略），

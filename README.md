@@ -218,7 +218,7 @@ scripts\run_serve.bat
 | `sector-strength` | 由本地日线计算板块强度（`--all` 全量回填历史） |
 | `limit-pool` | **采集涨停/炸板池**（`--years 1` 回填历史，`--show 10` 看当日涨停板） |
 | `dragon-tiger` | **采集龙虎榜**（每天 1 次请求，`--years 1` 回填历史） |
-| `auction` | **盘前竞价**：展示候选股集合竞价与高开风险（交易日 09:25 后跑） |
+
 | `finance` | 采集财务三表与指标（`--all` 全市场回填约 17 小时，建议夜间） |
 | `attribution` | **复盘归因**：用 LLM 把「涨跌」变成「为什么」，按原因分类聚合 |
 | `export` | 仅刷新展示层快照（不重算选股） |
@@ -231,15 +231,12 @@ scripts\run_serve.bat
 | `scripts\monitor.py` | 后台任务监控（自动识别当前在跑什么，给出进度与 ETA，并顶出失败告警） |
 | `scripts\backup_data.py` | 数据备份（含锁检测与副本校验，见第 10 章） |
 | `scripts\register_task.ps1` | 注册计划任务（含 `StartWhenAvailable`，见第 10 章） |
-| `scripts\probe_source.py` | 数据源连通性诊断 |
-| `scripts\probe_alt_source.py` | 备用通道探测（**直接调用系统真实适配器**，所见即系统所得） |
-| `scripts\regime_matrix.py` | 市场状态 × 档位交叉表现，用于校准 `tier_weights` |
-| `scripts\factor_ic.py` | **涨停因子有效性检验**：IC + 分组收益 + 多重检验校正 + 样本稳定性 |
-| `scripts\dragon_ic.py` | **龙虎榜有效性检验**：字段填充率 + IC + 稳定性（数据准入验收工具） |
+| `scripts\probe_hithink.py` | 同花顺接口连通性与字段探测（4 个核心接口） |
+| `scripts\probe_network.py` | 各行情站点网络可达性 |
+| `scripts\check_db_free.py` | 主库锁检测与「占用者是谁」识别（区分回测/回填/快照） |
 | `scripts\data_audit.py` | **数据资产体检**：台账/实际库/代码引用三方核对，自动检出「只写不读」的死数据 |
 | `scripts\check_caliber.py` | **口径交叉校验**：上游涨停家数 vs 自算，防状态判定被口径问题带偏 |
 | `scripts\run_dragon_backfill.bat` | 龙虎榜历史回填（后台跑，约 17 分钟/年） |
-| `scripts\bench_collect.py` | 采集性能基准测试 |
 | `scripts\run_tests.bat` | **一键跑全部自检**（见 `tests/` 目录） |
 | `scripts\run_validation.bat` | 一键跑完整验证链：因子 → 市场状态 → 快照 → 回测 → Skill 库 |
 
@@ -376,8 +373,8 @@ astock_ai/
 > 最初的配置写的是「趋势行情加码波段（0.7）、情绪退潮防守价值（0.8）」，
 > 但 485 个交易日的逐日回放证明这是**反的**：短线档在全部 5 种市场状态下
 > T+1 平均收益都最高（趋势期 +1.05% vs 波段 +0.19%；退潮期 +1.69% vs 价值 +0.58%）。
-> 校准依据与完整数据见 `config/settings.yaml` 中 `market_regime.tier_weights` 的注释，
-> 随时可用 `python scripts\regime_matrix.py` 重新核算。
+> 校准依据与完整数据见 `config/settings.yaml` 中 `market_regime.tier_weights` 的注释
+> （校准脚本 `regime_matrix.py` 已于 2026-09-30 随研究产物删除，需要时按 git 历史取回）。
 
 ---
 
@@ -820,7 +817,8 @@ scripts\run_backtest.bat --list             :: 查看历史回测运行
 
 1. 487 天数据上跑过的 7 轮回测（配额制、短线上限、基本面、入场过滤……），
    在诚实裁判下**全部落在噪声范围内**（改什么都没用）。
-2. 台面上没有「某状态适合某档位」的证据（`dws_style_matrix` 42 个格子 0 个显著更好）。
+2. 台面上没有「某状态适合某档位」的证据（`dws_style_matrix` 42 个格子 0 个显著更好；
+   该表与模块已于 2026-09-30 删除，结论留在配置注释里）。
 3. 真正的改进来自**引入新信息源**（影子信号就是这条路），而不是继续加工已有信息。
 
 若将来解冻，最低要求：**观察期选参 → 验证期检验**（影子模块用的就是这套：
@@ -935,5 +933,9 @@ GET /api/skills/{name}        → SKILL.md + meta + performance + references
 > **Phase 2/3 的设想全部暂缓**（LightGBM 排序、状态模型化、参数自动优化、Vue3 界面、
 > PostgreSQL 迁移）：在引入新的**有效信息源**之前，模型层再复杂也只是更精细地加工
 > 同一批已被市场定价的信息。下一个候选方向是用影子模块的方法论，把尚未使用的数据
-> （`dwd_dragon_tiger` 龙虎榜、`dwd_auction` 集合竞价）做成独立影子信号 —— 但**必须等
-> 本冻结期的验收结论出来之后**再启动。
+> （`dwd_dragon_tiger` 龙虎榜、集合竞价）做成独立影子信号 —— 但**必须等本冻结期的
+> 验收结论出来之后**再启动。
+>
+> ⚠️ 注意：2026-09-30 的清理删除了 `dwd_auction` 表与 `auction` 命令（当时 0 行、
+> 零使用），但**保留了同花顺接口包装 `HithinkCollector.auction_snapshot()`** ——
+> 要做竞价类信号时只差「落库 + 展示」两段，按 git 历史取回即可。

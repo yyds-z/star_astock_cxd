@@ -5,7 +5,10 @@
 > 以及哪些数据无法事后补**。
 >
 > 复现所需的一切都在仓库内：`requirements.txt`（依赖）、`config/*.yaml`（口径与阈值）、
-> `astock/storage/schema.sql`（28 张表结构）、`.env.example`（密钥模板）。
+> `astock/storage/schema.sql`（22 张表结构）、`.env.example`（密钥模板）。
+>
+> **2026-09-30 清理**：删除了 5 张表（3 张研究产物 + 空表 `dwd_auction` + 已弃用的
+> `dim_stock_finance`）与对应的脚本/模块；被删表的定义与结论可按 git 历史取回。
 
 ---
 
@@ -27,9 +30,9 @@
 | `/api/a-share/special-data/limit-up-pool` | `dwd_limit_up` | 涨停池：封单额、首封时间、连板高度、涨停原因 |
 | `/api/a-share/special-data/limit-break-pool` | `dwd_limit_break` | 炸板池：开板次数等 |
 | `/api/a-share/special-data/dragon-tiger-list` | `dwd_dragon_tiger` | 龙虎榜（固定全量、不分页，1 次请求/天） |
-| `/api/a-share/auction/snapshot` | `dwd_auction` | 集合竞价（单次上限 100 只） |
+| `/api/a-share/auction/snapshot` | （原 `dwd_auction`，2026-09-30 移除） | 集合竞价（单次上限 100 只）。接口包装仍在 `HithinkCollector.auction_snapshot()` |
 | `/api/a-share/prices/snapshot` | `dwd_intraday_snapshot` | **盘中快照**：现价/累计量额（单批 500 只可用） |
-| `/api/a-share/financials/{income,balance,cash-flow}-statements` | `dim_stock_finance` → `dws_finance_metrics` | 财务三表与指标（**单只查询**，每只 3 次请求） |
+| `/api/a-share/financials/{income,balance,cash-flow}-statements` | `dws_finance_metrics` | 财务三表与指标（**单只查询**，每只 3 次请求） |
 
 ### 2. akshare（免费，只负责「基础三件套」）
 
@@ -46,10 +49,13 @@
 
 ### 3. 本地派生（不需要任何外部数据）
 
-`dws_feature`、`dws_sector_strength`、`dws_market_regime`、`dws_limit_factor`、
-`dws_dragon_factor`、`dws_style_matrix`、`dws_finance_metrics`（由财务三表算）、
-以及全部 `ads_*`（决策与回测输出）。`dim_industry` / `dim_stock_industry`（行业映射）
-由 `sector` 命令从免费源同步（覆盖率约 91.5%）。
+`dws_feature`、`dws_sector_strength`、`dws_market_regime`、`dws_finance_metrics`
+（由财务三表算）、以及全部 `ads_*`（决策与回测输出）。
+`dim_industry` / `dim_stock_industry`（行业映射）由 `sector` 命令从免费源同步
+（覆盖率约 91.5%）。
+
+> 2026-09-30 移除的派生表：`dws_limit_factor`、`dws_dragon_factor`、`dws_style_matrix`
+> —— 它们是研究产物（结论已固化进配置注释），无生产代码读取。
 
 ---
 
@@ -66,7 +72,7 @@ copy .env.example .env
 ::    DEEPSEEK_API_KEY=<你的 DeepSeek Key>        （AI 报告与复盘归因；不填则用本地模板）
 ::    HITHINK_FINANCE_API_KEY=<你的同花顺 Key>    （必需 —— 日线/池子/财务/快照全靠它）
 
-:: 2) 建表（28 张表，来自 astock/storage/schema.sql）
+:: 2) 建表（22 张表，来自 astock/storage/schema.sql）
 python -m astock.cli initdb
 
 :: 3) 全历史日线（★★ 推荐路径：同花顺 10 年整库导出，分钟级）
@@ -135,7 +141,7 @@ python -m astock.cli shadow status
 | 数据 | 原因 | 后果 |
 |---|---|---|
 | `dwd_intraday_snapshot` | 免费源与同花顺都**不提供历史盘中截面** | 只能从开始记录那天起积累。在上述积累足够之前，任何「盘中决策」的回测都不可信 |
-| `dwd_auction` | 同上（竞价快照只在盘前采集） | 历史竞价数据不可回补 |
+| 集合竞价（原 `dwd_auction`） | 同上（竞价快照只在盘前采集） | 历史竞价数据不可回补。表已于 2026-09-30 移除（当时 0 行） |
 
 **这是唯一有时效性的约束**：晚一天开始采集，就永远少一天可回测的样本。
 
@@ -173,8 +179,8 @@ python -m astock.cli shadow status
 
 | 层 | 表 |
 |---|---|
-| dim | `dim_stock` `trade_calendar` `dim_industry` `dim_stock_industry` `dim_stock_finance` |
-| dwd | `dwd_daily_bar` `dwd_index_bar` `dwd_limit_up` `dwd_limit_break` `dwd_dragon_tiger` `dwd_auction` `dwd_intraday_snapshot` |
-| dws | `dws_feature` `dws_finance_metrics` `dws_market_regime` `dws_sector_strength` `dws_limit_factor` `dws_dragon_factor` `dws_style_matrix` |
+| dim | `dim_stock` `trade_calendar` `dim_industry` `dim_stock_industry` |
+| dwd | `dwd_daily_bar` `dwd_index_bar` `dwd_limit_up` `dwd_limit_break` `dwd_dragon_tiger` `dwd_intraday_snapshot` |
+| dws | `dws_feature` `dws_finance_metrics` `dws_market_regime` `dws_sector_strength` |
 | ads | `ads_recommend` `ads_review` `ads_review_attribution` `ads_shadow_pick` `ads_backtest` |
 | sys | `sys_collect_state` `sys_llm_usage` `sys_strategy_stats` |

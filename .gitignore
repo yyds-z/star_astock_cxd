@@ -4,20 +4,27 @@
 .env.local
 *.key
 
-# ---------------- 数据资产 ----------------
-# 主库、快照、报告、回测明细、日志：体积大（实测 data/ 约 4.6 GB），
+# ---------------- 数据资产（仅项目根目录）----------------
+# 主库、快照、报告、回测明细、日志：体积大（实测 data/ 约 3.2 GB），
 # 且是本机长期积累的资产，用 scripts\backup_data.bat 做本地备份，不通过 git 同步。
 # 数据如何从零复现见 config\DATA_SOURCES.md。
-data/
-logs/
+#
+# ⚠️ **必须带前导斜杠**：不带斜杠的 `data/` 会匹配**任意层级**的同名目录，
+# 从而把 `astock/data/`（数据采集层：collector / hithink / universe / calendar…）
+# 整个包装进忽略名单 —— 实测发生过：14 个核心源文件未入库，而 git status 不报任何异常，
+# clone 下来根本跑不起来。同理 `skills/` 会误伤 `astock/skills/`（Skill 库代码）。
+# 判断方法：改完执行 `git ls-files astock/data | wc -l` 应非空。
+/data/
+/logs/
 # 兜底：任何位置的大数据文件都不入库（GitHub 单文件硬限制 100MB）
 *.duckdb
 *.duckdb.wal
 *.parquet
 
 # ---------------- 派生输出（每日运行自动重建，纳入版本管理只会产生无意义变更）----------------
-# skills/ 是 `python -m astock.cli skills` 从 config 策略定义生成的副本
-skills/
+# 根目录 skills/ 是 `python -m astock.cli skills` 从 config 策略定义生成的副本
+# （注意：astock/skills/ 是生成它的代码，必须入库 —— 见上方警告）
+/skills/
 *.log
 
 # ---------------- Python ----------------

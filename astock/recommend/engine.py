@@ -142,16 +142,11 @@ class RecommendEngine:
         cand_df = pd.DataFrame(raw_candidates)
         logger.info("策略命中合计 %d 条（去重前）", len(cand_df))
 
-        # 5.5) 入场成本过滤：只针对**当日涨停**的候选（它们必然高开、成本高）。
-        # 非涨停候选实测是系统性**低开**（折价 -1.20%），对它们做成本惩罚是错的。
-        # 详见 astock/features/entry_cost.py 的模块注释。
-        from astock.features.entry_cost import apply_entry_cost_filter
-
-        cand_df, dropped = apply_entry_cost_filter(
-            cand_df, self.storage, data_date, self.cfg
-        )
-        if dropped is not None and not dropped.empty:
-            logger.info("入场成本过滤：剔除 %d 只当日涨停候选", len(dropped))
+        # 5.5) 入场成本过滤（`entry_cost`）**已于 2026-09-30 随研究产物一并移除**。
+        # 原实现（astock/features/entry_cost.py）针对当日涨停候选做开盘溢价惩罚，
+        # 但 A/B 实测只有 +0.0023 个百分点、n=34、t≈0.3（不显著），配置中早已
+        # `entry_cost.enabled: false`；其依赖的 `dws_limit_factor` 同批删除，
+        # 因此整条链（模块 + 调用 + 表）一并下掉，行为不变（本来就是关着的）。
 
         # 6) 评分
         scored = self.scorer.score(cand_df, features, regime_row)

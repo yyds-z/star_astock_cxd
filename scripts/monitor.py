@@ -745,7 +745,7 @@ def main() -> int:
         if "serve" in running:
             print("    本地 Web 服务在运行（只读快照，不会阻塞 daily 等写库命令）。")
         print("    下一步可选：")
-        print("      python scripts\\regime_matrix.py    # 看市场状态 × 档位表现，校准权重")
+        print("      python -m astock.cli shadow status  # 看影子信号成绩（v1.0 决策依据）")
         print("      python -m astock.cli daily          # 跑一次当日选股")
 
     print("=" * 64)

@@ -41,8 +41,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--source",
         type=str,
         default=None,
-        choices=["baostock", "akshare", "adata"],
-        help="数据源。baostock 被限流时可切到 akshare 继续（默认取配置）",
+        choices=["akshare"],
+        help="数据源。**只剩 akshare**（baostock/adata 适配器已于 2026-09-30 删除）",
     )
 
     p_daily = sub.add_parser("daily", help="执行每日全流程")
@@ -106,14 +106,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_attr.add_argument("--limit", type=int, default=50, help="本次最多归因多少条，默认 50")
     p_attr.add_argument("--days", type=int, default=90, help="统计回看天数，默认 90")
 
-    p_auction = sub.add_parser("auction", help="采集并展示候选股集合竞价（盘前 09:25 后）")
-    p_auction.add_argument("--date", type=str, default=None,
-                           help="交易日 YYYY-MM-DD，默认取最近一次推荐的计划交易日")
-    p_auction.add_argument("--codes", type=str, default=None,
-                           help="手动指定股票，逗号分隔（默认取最近一次推荐的全部候选）")
-    p_auction.add_argument("--stage", type=str, default="final", choices=["final", "live"],
-                           help="final=终态（09:25 后）| live=实时阶段")
-
     p_sector = sub.add_parser("sector", help="同步行业/板块映射（板块强度由本地日线自算）")
     p_sector.add_argument("--coverage", action="store_true", help="只查看映射覆盖率，不采集")
     p_sector.add_argument("--top", type=int, default=0, help="顺便打印当日强度前 N 的板块")
@@ -126,8 +118,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_index = sub.add_parser("index", help="同步指数日线（市场状态识别需要）")
     p_index.add_argument("--years", type=int, default=None, help="同步年限，默认取配置")
     p_index.add_argument(
-        "--source", type=str, default="akshare", choices=["baostock", "akshare", "adata"],
-        help="指数默认走 akshare（新浪源），baostock 被限流时依然可用",
+        "--source", type=str, default="akshare", choices=["akshare"],
+        help="指数走 akshare（新浪源）。其它源适配器已删除",
     )
 
     p_snap = sub.add_parser(
@@ -303,7 +295,7 @@ def cmd_daily(args) -> int:
                         print()
                         print(f"✖ 数据源预检失败，已停止本次选股：{diag}")
                         print("  原因：行情源可能正在维护或限流中。")
-                        print("  处理：稍后重跑；也可先跑 python scripts\\probe_alt_source.py 看各源状态。")
+                        print("  处理：稍后重跑；也可先跑 python scripts\\probe_hithink.py 看同花顺接口连通性。")
                         return 1
                     if probe < today:
                         print()
@@ -801,102 +793,6 @@ def cmd_attribution(args) -> int:
     print("-" * 72)
     print("  用途：次数最多的失败类别，就是最值得优先修的问题。")
     print("=" * 72)
-    return 0
-
-
-def cmd_auction(args) -> int:
-    """采集并展示候选股的集合竞价（盘前 09:25 后使用）。
-
-    存在意义：系统设计是「T+1 开盘买入」，那么**开盘价就是成本**。
-    竞价数据直接回答「今天该不该按计划买」——高开过多则当日胜率显著下降。
-    """
-    from astock.data.hithink import HithinkCollector
-    from astock.storage.db import get_storage
-
-    storage = get_storage()
-
-    if args.codes:
-        codes = [c.strip() for c in args.codes.split(",") if c.strip()]
-        target = args.date
-    else:
-        target = args.date or storage.query_value("SELECT MAX(trade_date) FROM ads_recommend")
-        if target is None:
-            print("没有推荐记录可供竞价跟踪。先跑：python -m astock.cli daily")
-            return 1
-        df = storage.query_df(
-            "SELECT code, name, tier, tier_rank FROM ads_recommend "
-            "WHERE trade_date = ? ORDER BY tier, tier_rank",
-            [target],
-        )
-        if df.empty:
-            print(f"{target} 没有推荐记录，可用 --codes 手动指定股票。")
-            return 1
-        codes = df["code"].tolist()
-
-    import pandas as pd
-
-    day = pd.to_datetime(str(target)).date() if target else None
-
-    try:
-        collector = HithinkCollector(storage)
-    except RuntimeError as exc:
-        print(f"[!] {exc}")
-        return 1
-
-    try:
-        n = collector.collect_auction(codes, d=day, stage=args.stage)
-    except Exception as exc:  # noqa: BLE001
-        print(f"集合竞价采集失败：{str(exc)[:200]}")
-        return 1
-
-    print()
-    print("=" * 84)
-    print(f"  集合竞价（{day}，stage={args.stage}）")
-    print("=" * 84)
-    if not n:
-        print("  未取到竞价数据。可能原因：非交易日；或当前时间早于 09:15。")
-        print("  盘中实时阶段可加 --stage live 再试。")
-        return 0
-
-    rows = storage.query_df(
-        "SELECT a.code, a.name, a.auction_pct, a.auction_volume_ratio, "
-        "a.auction_yesterday_ratio_pct, a.auction_unmatched, a.pre_close_price, "
-        "r.tier, r.tier_rank "
-        "FROM dwd_auction a "
-        "LEFT JOIN ads_recommend r ON r.code = a.code AND r.trade_date = a.date "
-        "WHERE a.date = ? ORDER BY a.auction_pct DESC",
-        [day],
-    )
-    print(f"  {'代码':<8}{'名称':<10}{'竞价涨幅':>9}{'量比':>7}{'占昨量':>9}{'未匹配':>12}  提示")
-    print("-" * 84)
-    for _, r in rows.iterrows():
-        pct = float(r["auction_pct"] or 0)
-        vr = r["auction_volume_ratio"]
-        un = r["auction_unmatched"]
-        if pct >= 5:
-            tip = "⚠ 大幅高开，成本高，谨慎追"
-        elif pct >= 2:
-            tip = "高开，注意回踩风险"
-        elif pct <= -3:
-            tip = "低开，观察能否企稳"
-        else:
-            tip = "平开"
-        vr_txt = f"{float(vr):.2f}" if vr is not None and not pd.isna(vr) else "-"
-        yd_txt = (
-            f"{float(r['auction_yesterday_ratio_pct']):.1f}%"
-            if r["auction_yesterday_ratio_pct"] is not None
-            and not pd.isna(r["auction_yesterday_ratio_pct"]) else "-"
-        )
-        # 未匹配量单位是「手」（上游口径），不是股
-        un_txt = f"{float(un):+.0f}手" if un is not None and not pd.isna(un) else "-"
-        print(f"  {r['code']:<8}{str(r['name'] or ''):<10}{pct:>+8.2f}%{vr_txt:>7}"
-              f"{yd_txt:>9}{un_txt:>12}  {tip}")
-    print("-" * 84)
-    print(f"  平均竞价涨幅 {rows['auction_pct'].mean():+.2f}%"
-          f"　高开(>2%) {int((rows['auction_pct'] > 2).sum())} 只"
-          f"　低开(<-2%) {int((rows['auction_pct'] < -2).sum())} 只")
-    print("  说明：系统按「T+1 开盘买入」计价，竞价涨幅即为买入成本。")
-    print("=" * 84)
     return 0
 
 
@@ -1439,7 +1335,6 @@ COMMANDS = {
     "limit-pool": cmd_limit_pool,
     "dragon-tiger": cmd_dragon_tiger,
     "dump-daily": cmd_dump_daily,
-    "auction": cmd_auction,
     "attribution": cmd_attribution,
     "finance": cmd_finance,
     "sector-strength": cmd_sector_strength,

@@ -101,7 +101,7 @@ datasets:
     cost: 秒级
     evidence: 「状态 × 档位」交叉表显示短线档在 5 种状态下均最优，
       据此校准的 tier_weights 已替换凭直觉写的旧权重
-    verify: python scripts\regime_matrix.py（需先跑回测）
+    verify: python scripts\regime_matrix.py（脚本已删除，结论保留）（需先跑回测）
     note: >
       **口径说明**：市场状态用**全市场**（含科创板）计算，而选股池已排除
       科创板/北交所（universe.boards = main + gem）。
@@ -109,17 +109,6 @@ datasets:
       （涨停 ≥ 80）是按全市场口径校准的 —— 若改用可交易子集计算，
       阈值需重新校准，否则会系统性误判。选股池的收窄不影响状态判定。
 
-  - table: dws_limit_factor
-    name: 涨停因子宽表
-    purpose: derived
-    status: validated
-    source: 由涨停池 + 日线 + 板块强度算出
-    cost: 秒级
-    evidence: 4 个因子通过 Bonferroni 校正且样本稳定
-      （详见下面 dwd_limit_up 条目）
-    verify: python scripts\factor_ic.py
-
-  # ---------------- 决策输入层 ----------------
   - table: dwd_limit_up
     name: 涨停池（含连板/封单/题材）
     purpose: regime
@@ -127,19 +116,19 @@ datasets:
     source: 同花顺 Financial-API
     cost: 回填 1 年约 35 分钟；日常 2 次请求/天
     evidence: >
-      python scripts\factor_ic.py 结论（242 个交易日 / 1.87 万条）：
+      python scripts\factor_ic.py（脚本已删除，结论保留） 结论（242 个交易日 / 1.87 万条）：
       封单额占比 IC -0.085 (t=-8.40)、换手率 +0.045 (t=+4.46)、
       封单额 -0.038 (t=-3.91)、首次涨停时间 +0.037 (t=+3.51)，
       四者均通过 Bonferroni 校正（阈值 2.77）且对半切分方向稳定。
       核心结论：强封板 → 次日高开越多 → 以开盘价买入越亏（全体 -0.22%/胜率 43.5%）。
       市场级：涨停家数 vs 次日指数 IC -0.098。
-    verify: python scripts\factor_ic.py
+    verify: python scripts\factor_ic.py（脚本已删除，结论保留）
     note: >
       有效性已证实，但**适用场景受限**：结论针对"打板（次日开盘买入）"，
       而现有策略绝大多数不买当日涨停股（实测当日涨停候选仅占 4.52%）。
       2026-09-23 的落地方式（不直接进评分的理由已修正）：
         ① 市场状态：涨停家数/炸板率已进 dws_market_regime；
-        ② **入场成本过滤**（astock/features/entry_cost.py）——
+        ② **入场成本过滤**（astock/features/entry_cost.py（已删除））——
            只对「当日涨停的候选」按封板强度估算次日开盘溢价，
            超过 3% 即剔除。实测候选股整体是系统性**低开**（跳空均值 -1.20%），
            因此对非涨停候选做成本惩罚是错的；只有当日涨停股必然高开。
@@ -153,7 +142,7 @@ datasets:
     source: 同花顺 Financial-API
     cost: 与涨停池同批，无额外请求
     evidence: 炸板率是「情绪退潮」状态的判定条件之一；实测炸板率与次日指数 IC -0.043
-    verify: python scripts\factor_ic.py（第五节 市场级因子）
+    verify: python scripts\factor_ic.py（脚本已删除，结论保留）（第五节 市场级因子）
 
   - table: dws_sector_strength
     name: 板块强度（本地自算）
@@ -189,14 +178,14 @@ datasets:
     source: 同花顺 Financial-API
     cost: 回填 1 年约 17 分钟；日常 1 次请求/天
     evidence: >
-      python scripts\dragon_ic.py 结论（242 个交易日 / 11,436 条当日榜）：
+      python scripts\dragon_ic.py（脚本已删除，结论保留） 结论（242 个交易日 / 11,436 条当日榜）：
       唯一接近有效的因子是「净买入占比」IC -0.028 (t=-2.62)，
       但仅比 Bonferroni 阈值 2.58 高 0.04 —— 属**擦线通过**
       （阈值只要有微小变动结论就翻转），不足以支撑「改评分」这种有成本的决策。
       上榜股本身：次日开盘溢价 -0.62%（低开）、买入后 +0.57%、胜率 48.0%、
       T+3 -0.24% —— 无显著交易价值。
       机构参与与否的差异仅 +0.02%，无区分度。
-    verify: python scripts\dragon_ic.py
+    verify: python scripts\dragon_ic.py（脚本已删除，结论保留）
     note: >
       ① 字段缺失：amount / org_buy_num / org_sell_num 上游**实测从未返回**
       （填充率 0%），接口文档虽列出但响应为空，故「机构买入家数」不可用，
@@ -219,15 +208,6 @@ datasets:
       与次日及 20 日收益的 IC；③ 在全市场财务到位前，**不做全市场回填**，
       只采候选股（约 1 分钟/天）用于报告展示。
     note: 采集成本最高的一份数据，必须先验证再全量回填 —— 否则 17 小时换一个可能的噪声。
-
-  - table: dwd_auction
-    name: 集合竞价
-    purpose: decision
-    status: display
-    source: 同花顺 Financial-API
-    cost: 1 次请求/天（仅候选股）
-    evidence: 不追求统计有效性：它的用途是盘前人工决策（开盘价即买入成本）
-    verify: 人工核对每日竞价值与行情软件一致
 
   - table: dim_stock_industry
     name: 个股 → 行业映射
@@ -293,20 +273,6 @@ datasets:
       即缩量**整理**有效，缩量**回踩**无效 —— 不要改成回踩型。
 
   # ---------------- 已判定无用途 ----------------
-  - table: dim_stock_finance
-    name: 基本面快照（申万接口附带）
-    purpose: display
-    status: deprecated
-    source: 申万成分接口附带返回
-    cost: 随行业同步附带，无额外请求
-    evidence: >
-      **只写不读**：全代码库中仅有 sectors.py 的写入点，
-      没有任何读取点（data_audit.py 会自动检出这类"死数据"）。
-      且为无历史时点的快照，无法用于回测。
-    verify: 已被 dws_finance_metrics（多期 + 披露日）取代
-    note: 建议停止写入该表；保留历史数据不影响，但不再作为任何决策依据。
-
-  # ---------------- 明确不采集 ----------------
   - table: （未采集）新闻/舆情
     name: 新闻与舆情文本
     purpose: display
@@ -319,3 +285,12 @@ datasets:
       ② 需 LLM 抽取结构化标签，成本是候选股报告的数十倍；
       ③ 验证周期长（需积累足够样本才能做有效性检验）。
       按规范，**在能写出可执行的验证方法之前不采集**。
+  # ---------------- 已随研究产物删除（2026-09-30）----------------
+  # dws_limit_factor / dws_dragon_factor / dws_style_matrix
+  #   → 研究结论已固化在本文件与 settings.yaml 的注释里；42 个格子中"显著更好"为 0，
+  #     状态级绑定无正向依据，构建器模块与依赖它们的 entry_cost 过滤一并删除。
+  # dwd_auction
+  #   → 自建库以来 0 行（零使用）。同花顺接口包装 hithink.auction_snapshot() 保留。
+  # dim_stock_finance
+  #   → 早已被 dws_finance_metrics（同花顺财务三表）取代。
+  # 需要恢复时按 git 历史取回本段与 schema.sql 中对应的表定义。

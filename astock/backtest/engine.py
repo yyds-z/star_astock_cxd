@@ -224,13 +224,10 @@ class BacktestEngine:
 
             if raw:
                 regime_row = regime_map.get(day, {})
-                # 入场成本过滤：与 RecommendEngine 共用同一实现。
-                # 只改推荐侧会让 A/B 回测对比失去意义（回测跑的还是旧逻辑）。
-                from astock.features.entry_cost import apply_entry_cost_filter
-
-                cand_df, _dropped = apply_entry_cost_filter(
-                    pd.DataFrame(raw), self.storage, day, self.cfg
-                )
+                # 入场成本过滤已随研究产物一并移除（2026-09-30），
+                # 与 RecommendEngine 保持对称 —— 原先两者必须同步改，
+                # 否则 A/B 对比会失真。详见 recommend/engine.py 的同位置注释。
+                cand_df = pd.DataFrame(raw)
                 scored = self.scorer.score(cand_df, features, regime_row)
                 for _, r in scored.iterrows():
                     records.append(

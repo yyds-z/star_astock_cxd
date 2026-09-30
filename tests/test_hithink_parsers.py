@@ -34,7 +34,6 @@ except Exception:  # noqa: BLE001
     pass
 
 from astock.data.hithink import HithinkCollector  # noqa: E402
-from astock.features.limit_factor import FACTOR_COLUMNS  # noqa: E402
 from astock.review.attribution import CATEGORIES, Attributor, build_prompt  # noqa: E402
 from astock.storage.db import SCHEMA_FILE, Storage  # noqa: E402
 
@@ -87,13 +86,6 @@ def test_row_keys_match_schema() -> None:
         "org_buy_num": 2, "org_sell_num": 1, "hot_money_net_value": 5e7,
         "limit_reason": "氢氟酸涨价",
     }
-    auction_item = {
-        "ticker": "600519", "name": "贵州茅台", "auction_price": 1255.0,
-        "auction_pct": 0.0981, "auction_volume": 63.1, "auction_amount": 7.9e6,
-        "auction_unmatched": 0.9, "auction_turnover_pct": 0.0005,
-        "auction_yesterday_ratio_pct": 0.2568, "auction_volume_ratio": 1.12,
-        "pre_close_price": 1253.8, "open_price": 1255.0, "float_market_cap": 1.5e12,
-    }
     # 财务三表：只需覆盖会被读到的字段
     income = [{
         "period_end_ms": ms(D), "report_date_ms": ms(date(2026, 8, 29)),
@@ -108,7 +100,7 @@ def test_row_keys_match_schema() -> None:
         ("dwd_limit_up", HithinkCollector._up_rows(D, [limit_item])),
         ("dwd_limit_break", HithinkCollector._break_rows(D, [break_item])),
         ("dwd_dragon_tiger", HithinkCollector._dragon_rows(D, [dragon_item])),
-        ("dwd_auction", HithinkCollector._auction_rows(D, [auction_item])),
+        # dwd_auction 已随表移除（2026-09-30，该表 0 行），不再校验
         ("dws_finance_metrics",
          HithinkCollector._finance_rows("600519", {"income": income,
                                                    "balance": balance,
@@ -157,13 +149,9 @@ def test_report_date_stored() -> None:
     check("report_date 正确（≠ 报告期末）", row["report_date"] == date(2026, 8, 29))
 
 
-def test_auction_units() -> None:
-    """竞价字段原样透传：涨跌幅已是百分数、成交量单位是手。"""
-    item = {"ticker": "600519", "auction_pct": 0.0981, "auction_volume": 63.1,
-            "auction_unmatched": 0.9, "auction_price": 1255.0}
-    row = HithinkCollector._auction_rows(D, [item])[0]
-    check("竞价涨跌幅不做二次换算", abs(row["auction_pct"] - 0.0981) < 1e-9)
-    check("竞价成交量原样透传（单位=手）", abs(row["auction_volume"] - 63.1) < 1e-9)
+# test_auction_units 已随 dwd_auction 表与 _auction_rows 一并移除（2026-09-30）。
+# 若将来恢复竞价链路，按 git 历史取回本用例即可（要点：竞价成交量单位是「手」、
+# 涨跌幅已是百分数原值，不做二次换算）。
 
 
 # ---------------- 3. 财务口径 ----------------
@@ -240,32 +228,12 @@ def test_attribution_prompt() -> None:
     check("Prompt 含全部类别枚举", not missing, f"缺少：{missing}")
 
 
-# ---------------- 5. 因子表与统计工具 ----------------
-def test_factor_columns_match_schema() -> None:
-    """因子表列顺序必须与 schema 一致 —— 不一致会让 INSERT 直接失败。"""
-    cols = schema_columns("dws_limit_factor")
-    check("dws_limit_factor 列与代码常量一致",
-          cols == set(FACTOR_COLUMNS),
-          f"只在代码里：{sorted(set(FACTOR_COLUMNS) - cols)}；"
-          f"只在 DDL 里：{sorted(cols - set(FACTOR_COLUMNS))}")
-
-
-def test_statistics() -> None:
-    """多重检验校正阈值与 IC 统计口径。"""
-    import numpy as np
-    import pandas as pd
-
-    fic = load_module(ROOT / "scripts" / "factor_ic.py", "factor_ic_lib")
-
-    check("Bonferroni 阈值随检验次数上升",
-          fic.t_crit(1) < fic.t_crit(9) < fic.t_crit(50))
-    check("单次检验阈值 ≈ 1.96", abs(fic.t_crit(1) - 1.96) < 0.01, str(fic.t_crit(1)))
-    check("9 次检验阈值 ≈ 2.77", abs(fic.t_crit(9) - 2.77) < 0.02, str(fic.t_crit(9)))
-
-    s = pd.Series(np.full(30, 0.05))
-    st = fic.ic_stats(s + np.linspace(-0.01, 0.01, 30))
-    check("IC 统计返回均值与天数", st.get("days") == 30 and st.get("mean_ic") is not None)
-    check("样本不足（<20）时只返回天数", fic.ic_stats(pd.Series([0.1] * 5))["days"] == 5)
+# ---------------- 5.（已移除）因子表与统计工具 ----------------
+# 原两项用例随研究产物于 2026-09-30 一并移除：
+#   · test_factor_columns_match_schema —— 校验 dws_limit_factor 列序（表与
+#     FACTOR_COLUMNS 均已删除）
+#   · test_statistics —— 校验 scripts/factor_ic.py 的 Bonferroni 阈值与 IC 统计
+#     （脚本已删除）。若将来恢复研究工具，按 git 历史取回即可。
 
 
 def main() -> int:
@@ -278,7 +246,7 @@ def main() -> int:
     test_dragon_defaults()
     print("\n[2] 前视偏差与单位")
     test_report_date_stored()
-    test_auction_units()
+    # test_auction_units 已随 dwd_auction 表移除（2026-09-30）
     print("\n[3] 财务口径")
     test_finance_yoy()
     test_finance_negative_base()
@@ -286,9 +254,8 @@ def main() -> int:
     print("\n[4] 复盘归因")
     test_attribution_metrics()
     test_attribution_prompt()
-    print("\n[5] 因子表与统计工具")
-    test_factor_columns_match_schema()
-    test_statistics()
+    # [5] 因子表与统计工具 已随研究产物移除（2026-09-30）：
+    #   dws_limit_factor / FACTOR_COLUMNS / scripts/factor_ic.py 均已删除。
 
     failed = [r for r in _results if not r[0]]
     print()

@@ -195,7 +195,8 @@ market_regime:
   # 因此不能把权重全部给短线，否则多数交易日候选数会不足 5 只；
   # 波段/价值档保留 0.15~0.30 的配额用于补位。
   #
-  # 校准工具：python scripts\regime_matrix.py
+  # 校准工具（scripts/regime_matrix.py）已于 2026-09-30 随研究产物删除；
+  # 结论（上方的状态×档位表现）仍保留在本注释中。需要时按 git 历史取回脚本。
   tier_weights:
     trend:      {short: 0.50, swing: 0.25, value: 0.25}
     euphoria:   {short: 0.70, swing: 0.25, value: 0.05}
@@ -230,9 +231,11 @@ market_regime:
 #   很多格子只有几十个样本，直接按均值排序 = 把噪声当规律。
 #   格子分 = (n×格子分 + k×该规则全局分) / (n+k)，样本越少越往全局靠。
 #   取 40 是"半个样本量级"的经验值：n=40 时格子与全局各占一半。
-style_matrix:
-  shrink_k: 40
-  min_samples: 20      # 低于此样本数的格子标记 thin，不参与绑定
+# 【已删除】style_matrix 配置块（2026-09-30）
+# 实现模块（astock/market/style_matrix.py）、表（dws_style_matrix）与执行脚本
+# （scripts/regime_matrix.py）同批移除 —— 结论已完整写在上方注释里，
+# 配置项本身已无消费方。若将来恢复该研究，按 git 历史取回三处即可。
+# 原参数（供恢复时参考）：shrink_k: 40、min_samples: 20
 
 # ---------------- 影子模块：涨停基因 + 缩量不破位 ----------------
 # 定位：**独立于现有评分体系**，只落库、只统计，不参与选股。
@@ -294,11 +297,13 @@ shadow_gene:
 #   · 但摊到全部 5586 个候选位只有 **+0.0023 个百分点**（0.686% → 0.688%），
 #     样本 n=34、t≈0.3，**统计上不显著**。
 # 按项目的数据准入规则（未验证项不得影响决策），关闭之。
-# 代码与分档依据保留（astock/features/entry_cost.py），等候选位增多、
-# 替换频率上升后（如 total_picks 调大）再重估。
-entry_cost:
-  enabled: false
-  max_premium: 3.0      # 预估次日开盘溢价超过此值(%)即剔除该候选
+# 代码与分档依据曾保留（astock/features/entry_cost.py），2026-09-30 已随研究产物
+# 一并删除；若将来候选位增多需要重估，按 git 历史取回该模块与两处调用点。
+# 【已删除】entry_cost 配置块（2026-09-30）
+# 实现（astock/features/entry_cost.py）、其依赖的研究表（dws_limit_factor）
+# 与两处调用点（recommend/engine.py、backtest/engine.py）同批移除。
+# 如上所述该功能早已关闭，**删除不改变任何行为**。原参数供恢复参考：
+#   enabled: false、max_premium: 3.0
 
 # ---------------- 策略参数 ----------------
 strategy:

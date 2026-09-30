@@ -21,7 +21,7 @@ DuckDB 主库里是**唯一且不可再生**的资产 —— 历史日线、每�
 用法：
     python scripts/backup_data.py                       # 备份到 data/backups/
     python scripts/backup_data.py --dest E:\\astock_backup
-    python scripts/backup_data.py --keep 10             # 保留最近 10 份
+    python scripts/backup_data.py --keep-months 12      # 月度归档保留 12 个月
     python scripts/backup_data.py --list                # 查看已有备份
 """
 
@@ -143,19 +143,46 @@ def list_backups(dest_root: Path) -> int:
     return 0
 
 
-def prune(dest_root: Path, keep: int) -> list[str]:
+def prune(dest_root: Path, keep_newest: int = 1, keep_months: int = 6) -> list[str]:
+    """按月轮转：保留**最新 N 份** + 最近 M 个月的**月度归档各 1 份**。
+
+    为什么不用「保留最近 K 份」（原实现是 `items[keep:]`）：备份每周 1 份、
+    每份约 1.4 GB，按份数保留会让占用线性增长（默认 5 份 ≈ 7 GB），
+    而且**没有长期视角** —— 半年前的检查点留不下，上周的却囤了 5 份。
+    按月归档的语义更贴合实际需求：**最近的随时能回滚，历史每月留一个检查点**。
+    """
     items = sorted((d for d in dest_root.iterdir() if d.is_dir()), reverse=True)
+    if not items:
+        return []
+    keep: set[Path] = set(items[: max(1, keep_newest)])
+    months: set[str] = set()
+    for d in items:                      # 名称倒序 = 时间倒序（YYYYMMDD_HHMMSS）
+        month = d.name[:6]
+        if not month.isdigit():          # 非日期命名的目录（如 pre_finance_xxx）
+            keep.add(d)                  # 视为人工归档，不动它
+            continue
+        if month in months:
+            continue                     # 该月已留过一份
+        months.add(month)
+        keep.add(d)
+        if len(months) >= max(1, keep_months):
+            break
     removed: list[str] = []
-    for old in items[keep:]:
-        shutil.rmtree(old, ignore_errors=True)
-        removed.append(old.name)
+    for d in items:
+        if d not in keep:
+            shutil.rmtree(d, ignore_errors=True)
+            removed.append(d.name)
     return removed
+
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="astock_ai 数据备份")
     parser.add_argument("--dest", default=None, help="备份根目录（默认 <项目>/data/backups）")
-    parser.add_argument("--keep", type=int, default=5, help="保留最近多少份，默认 5")
+    parser.add_argument("--keep-newest", type=int, default=1,
+                        help="无条件保留最新的 N 份，默认 1")
+    parser.add_argument("--keep-months", type=int, default=6,
+                        help="每月各保留 1 份月度归档，默认保留最近 6 个月")
     parser.add_argument("--list", action="store_true", help="只看已有备份，不执行备份")
     parser.add_argument("--allow-locked-db", action="store_true",
                         help="主库被占用时仍强行复制（危险，不推荐）")
@@ -254,10 +281,11 @@ def main() -> int:
         encoding="utf-8",
     )
 
-    # ---- 轮转 ----
-    removed = prune(dest_root, max(1, args.keep))
+    # ---- 轮转（按月归档：最新 N 份 + 每月 1 份）----
+    removed = prune(dest_root, args.keep_newest, args.keep_months)
     if removed:
-        print(f"  已清理旧备份 {len(removed)} 份（保留最近 {args.keep} 份）：{'、'.join(removed)}")
+        print(f"  已清理旧备份 {len(removed)} 份（保留最新 {args.keep_newest} 份 + "
+              f"最近 {args.keep_months} 个月的月度归档）：{'、'.join(removed)}")
 
     print()
     print(f"  ✔ 备份完成：{target}")
