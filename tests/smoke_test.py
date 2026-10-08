@@ -29,6 +29,8 @@ ENDPOINTS = [
     ("GET", "/api/shadow/latest", None),
     ("GET", "/api/shadow/history?days=30", None),
     ("GET", "/api/shadow/review?days=30", None),
+    ("GET", "/api/limitup", None),
+    ("GET", "/api/limitup?day=2026-09-30", None),
     ("GET", "/api/equity", None),
     ("GET", "/api/calibration", None),
     ("GET", "/api/sector/top?n=10", None),

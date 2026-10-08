@@ -603,68 +603,42 @@ class ReportBuilder:
             lines.append("")
             return lines
 
-        def board_badge(r: Any) -> str:
-            """连板徽标：优先上游原文（首板 / 3连板），缺失时按 boards 拼。"""
-            txt = r.get("board_text")
-            if isinstance(txt, str) and txt.strip():
-                return txt.strip()
-            try:
-                b = int(r.get("boards") or 1)
-            except (TypeError, ValueError):
-                b = 1
-            return "首板" if b <= 1 else f"{b}连板"
+        # 分组与徽标口径来自**共享模块**：网页的 /api/limitup 用同一个函数，
+        # 两处若各写一份，"报告里的行业"和"页面上的行业"迟早会不一样。
+        from astock.market.limitup import group_limit_up, ladder_text
 
-        def theme_tag(r: Any) -> str:
-            """题材只取第一段：上游原文形如 '固态电池+钠离子电池+AI PC键盘'。"""
-            txt = r.get("reason")
-            if not isinstance(txt, str) or not txt.strip():
-                return ""
-            return txt.split("+")[0].strip()
+        g = group_limit_up(rows)
 
         def cell(items: list) -> str:
             parts = []
-            for r in items:
-                badge = board_badge(r)
+            for x in items:
                 # 连板 ≥2 加粗（打板视角最该注意的部分）；首板不加粗，避免满屏强调
-                if not badge.startswith("首板"):
-                    badge = f"**{badge}**"
-                tag = theme_tag(r)
-                parts.append(
-                    f"{str(r.get('first_time') or '')} {r['name']}"
-                    f"({badge}{'·' + tag if tag else ''})"
-                )
+                badge = f"**{x['badge']}**" if x["is_multi_board"] else x["badge"]
+                tag = f"·{x['theme']}" if x["theme"] else ""
+                parts.append(f"{x['first_time']} {x['name']}({badge}{tag})")
             return "、".join(parts)
 
-        groups: dict[str, list] = {}
-        for _, r in rows.iterrows():
-            groups.setdefault(str(r["industry"]), []).append(r)
-
-        # 家数为 1 的行业、以及完全没有行业映射的（'未分类'），一并归入「其他」：
-        # 前者单只占一行会把有效信息淹掉，后者本就无分组意义。
-        multi = sorted(
-            ((k, v) for k, v in groups.items() if len(v) > 1 and k != "未分类"),
-            key=lambda kv: (-len(kv[1]), kv[0]),
-        )
-        solo = [r for k, v in groups.items() if len(v) == 1 or k == "未分类" for r in v]
-        try:
-            n_multi_board = int((rows["boards"].fillna(1) > 1).sum())
-        except Exception:  # noqa: BLE001
-            n_multi_board = 0
-
         lines.append(
-            f"数据日 {data_date} 共 **{len(rows)}** 只涨停（连板 ≥2 的 {n_multi_board} 只）。"
+            f"数据日 {data_date} 共 **{g['total']}** 只涨停"
+            f"（连板 ≥2 的 {g['multi_board']} 只）。"
             "格式：`封板时间 名称(连板·题材)`，题材取上游第一段；连板 ≥2 加粗。"
         )
         lines.append("")
-        lines.append(f"> 口径：家数来自同花顺涨停池（{len(rows)} 只），与「三、市场环境」的"
+        # 连板梯队：高标单独提一行 —— 否则它们会随行业被"其他"吞掉
+        # （实测 2026-10-08 的 8 连板新华传媒就落在「其他」里）。
+        if g["ladder"]:
+            lines.append(f"> **连板梯队**：{ladder_text(g['ladder'])}")
+            lines.append("")
+        lines.append(f"> 口径：家数来自同花顺涨停池（{g['total']} 只），与「三、市场环境」的"
                      "涨停家数统计口径不同，数值不必相等。")
         lines.append("")
         lines.append("| 行业（家数） | 公司 |")
         lines.append("|---|---|")
-        for ind, items in multi:
-            lines.append(f"| {ind}（{len(items)}） | {cell(items)} |")
-        if solo:
-            lines.append(f"| 其他（{len(solo)}） | {cell(solo)} |")
+        for grp in g["groups"]:
+            lines.append(f"| {grp['industry']}（{grp['count']}） | {cell(grp['items'])} |")
+        if g["other"]:
+            lines.append(f"| {g['other']['label']}（{g['other']['count']}） | "
+                         f"{cell(g['other']['items'])} |")
         lines.append("")
         return lines
 

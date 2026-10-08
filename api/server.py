@@ -392,6 +392,58 @@ def shadow_review(days: int = Query(60, ge=1, le=400)) -> dict[str, Any]:
 
 
 # ---------------- 曲线（净值 / 校准）----------------
+# ---------------- 涨停板（按行业）----------------
+# 与每日报告「四、涨停板」**共用同一分组口径**（astock/market/limitup.py）：
+# 分组、"其他"桶、连板徽标、题材截断都在那边，这里只负责取数与返回。
+# 两处各写一份的话，"报告里的行业"和"页面上的行业"迟早会不一样。
+@app.get("/api/limitup")
+def limitup(
+    day: str | None = Query(None, description="YYYY-MM-DD，缺省为最新数据日"),
+) -> dict[str, Any]:
+    _need_snapshot()
+    reader = get_reader()
+    if not reader.ensure("limit_up"):
+        return {"available": False,
+                "hint": "尚无涨停快照：需先跑 daily（或 python -m astock.cli export）"}
+    dates = [
+        str(r["d"])[:10]
+        for r in reader.records(
+            "SELECT DISTINCT CAST(date AS VARCHAR) AS d FROM limit_up ORDER BY d DESC LIMIT 60",
+            "limit_up",
+        )
+    ]
+    if not dates:
+        return {"available": False, "hint": "涨停快照为空"}
+    target = (day or dates[0])[:10]
+    if target not in dates:
+        target = dates[0]
+    rows = reader.query(
+        "SELECT * FROM limit_up WHERE CAST(date AS VARCHAR) = ? ORDER BY first_time",
+        "limit_up",
+        [target],
+    )
+
+    from astock.market.limitup import OTHER_LABEL, group_limit_up
+
+    g = group_limit_up(rows)
+    return {
+        "available": True,
+        "date": target,
+        "available_dates": dates,
+        "total": g["total"],
+        "multi_board": g["multi_board"],
+        "ladder": g["ladder"],
+        "groups": g["groups"],
+        "other": g["other"],
+        "rules": [
+            "行业：申万一级优先，缺失回退新浪行业",
+            f"家数为 1 的行业与无行业归属的并入「{OTHER_LABEL}」",
+            "连板 ≥2 加粗；题材取涨停原因的第一段",
+            "与「市场环境」的涨停家数统计口径不同，数值不必相等",
+        ],
+    }
+
+
 @app.get("/api/equity")
 def equity(include_benchmark: bool = Query(True)) -> dict[str, Any]:
     """两条净值曲线（影子信号 + 同池等权基准）+ 绩效/显著性指标。

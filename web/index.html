@@ -114,6 +114,16 @@
     <div id="deskVerdict"></div>
   </div>
 
+  <!-- 涨停板（按行业）：与每日报告「四、涨停板」共用同一分组口径 -->
+  <div class="panel" style="margin-bottom:16px;">
+    <h2>涨停板 · 按行业
+      <span class="tag" id="luDate">—</span>
+      <span class="tag" id="luCount">—</span>
+    </h2>
+    <div class="muted" id="luLadder" style="font-size:12px;margin-bottom:10px;line-height:2;">加载中…</div>
+    <div id="luTable"><div class="empty">加载中…</div></div>
+  </div>
+
   <!-- 影子复盘（归因）：把「涨了/跌了」变成「为什么」，供理解与校正 -->
   <div class="panel" style="margin-bottom:16px;">
     <h2>影子复盘（归因）
@@ -598,10 +608,56 @@ async function loadSectorMap(){
   });
 }
 
+/* ==================== 涨停板（按行业） ==================== */
+/* 分组、"其他"桶、连板徽标、题材截断全由接口算好（astock/market/limitup.py，
+   与每日报告「四、涨停板」同一口径），这里只负责画。 */
+async function loadLimitUp(){
+  const box = document.getElementById("luTable");
+  const lad = document.getElementById("luLadder");
+  const d = await get("/api/limitup");
+  if(!d || !d.available){
+    document.getElementById("luDate").textContent = "无数据";
+    document.getElementById("luCount").textContent = "";
+    lad.textContent = "";
+    box.innerHTML = emptyHint((d && d.hint) || "暂无涨停数据",
+                              "python -m astock.cli export");
+    return;
+  }
+  document.getElementById("luDate").textContent = `数据日 ${d10(d.date)}`;
+  document.getElementById("luCount").textContent =
+    `${d.total} 只涨停 · 连板≥2 的 ${d.multi_board} 只`;
+
+  // 连板梯队：高标单独提一行，否则会随行业被「其他」吞掉
+  const buckets = {};
+  (d.ladder || []).forEach(x => { (buckets[x.badge] = buckets[x.badge] || []).push(x); });
+  lad.innerHTML = Object.keys(buckets).length
+    ? `<b>连板梯队</b>：` + Object.keys(buckets).map(b =>
+        `<b>${b}</b> ` + buckets[b].map(x =>
+          `${x.name}<span class="muted">(${x.industry})</span>`).join("、")
+      ).join("　｜　")
+    : "今日无连板 ≥2 的个股（全部为首板）。";
+
+  const rows = (d.groups || []).map(g => [g.industry, g.count, g.items])
+    .concat(d.other ? [[d.other.label, d.other.count, d.other.items]] : []);
+  const cell = items => items.map(x =>
+    `${x.first_time} ${x.is_multi_board ? `<b>${x.name}</b>` : x.name}`
+    + `<span class="${x.is_multi_board ? "warn" : "muted"}">`
+    + `(${x.badge}${x.theme ? "·" + x.theme : ""})</span>`).join("、");
+  box.innerHTML = `<table><thead><tr>
+      <th>行业（家数）</th><th>公司（封板时间 · 名称 · 连板 · 题材）</th>
+    </tr></thead><tbody>${rows.map(([ind, c, items]) =>
+      `<tr><td>${ind}<span class="muted">（${c}）</span></td><td>${cell(items)}</td></tr>`
+    ).join("")}</tbody></table>
+    <div class="muted" style="font-size:12px;margin-top:8px;">
+      口径：同花顺涨停池；行业为申万一级优先、缺失回退新浪行业；家数为 1 的行业与
+      无行业归属的并入「其他」。与「市场环境」的涨停家数统计口径不同，数值不必相等。
+    </div>`;
+}
+
 async function loadAll(){
   await Promise.all([
     loadDesk(), loadShadowReview(), loadEquity(), loadCalibration(),
-    loadSectorMap(), loadMarket()
+    loadSectorMap(), loadMarket(), loadLimitUp()
   ]);
 }
 

@@ -64,6 +64,19 @@ SNAPSHOT_QUERIES: dict[str, str] = {
     # "backtest_daily"（主链路净值）与 "backtest_scores"（主链路校准曲线原始点）
     # 已于 2026-10-08 随 ads_backtest（主链路回测）一并删除。
     # 影子的净值/校准不需要预导快照：它们由 shadow 快照现算（api/server.py）。
+    # ---- 涨停板（按行业）：报告「四、涨停板」与网页共用同一分组口径 ----
+    # 行业在这里就 JOIN 好（申万一级优先、缺失回退新浪行业），页面不必自己重算 ——
+    # 重算就意味着"页面与报告的行业划分可能不同"，这正是要避免的失效模式。
+    # 只导最近 40 个自然日（每日 40~60 只，合计约 2 千行，体积可忽略）。
+    "limit_up": """
+        SELECT l.date, l.code, l.name, l.first_time, l.boards, l.board_text, l.reason,
+               COALESCE(sw.industry_name, sn.industry_name) AS industry
+        FROM dwd_limit_up l
+        LEFT JOIN dim_stock_industry sw ON sw.code = l.code AND sw.source = 'sw'
+        LEFT JOIN dim_stock_industry sn ON sn.code = l.code AND sn.source = 'sina'
+        WHERE l.date >= (SELECT MAX(date) FROM dwd_limit_up) - INTERVAL 40 DAY
+        ORDER BY l.date DESC, l.first_time
+    """,
 }
 
 
