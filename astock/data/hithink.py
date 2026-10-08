@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -51,6 +52,10 @@ PATH_AUCTION = "/api/a-share/auction/snapshot"
 #      （量比见 `astock/data/intraday.py`）。
 PATH_SNAPSHOT = "/api/a-share/prices/snapshot"
 SNAPSHOT_BATCH = 500
+# 上游对"无法识别的代码"的报错会点名具体代码，形如：
+#   [path] 业务错误 code=1002：Unknown A-share thscode: 301139.SZ
+# 解析出它就能把这一只剔掉、保住同批其余 499 只（见 `_snapshot_batch`）。
+_BAD_THSCODE_RE = re.compile(r"Unknown A-share thscode:\s*([0-9]{6})", re.I)
 # 财务报表三件套：入参契约一致，**单只查询、不接受逗号**，因此每只股票 3 次请求。
 # 全市场（5200 只 × 3）在 15 次/分钟限流下约需 17 小时 —— 只适合夜间跑，
 # 日常只对候选股（约 15 只）采集。
@@ -647,6 +652,63 @@ class HithinkCollector:
         return to_source_code(code, "tushare")
 
     # ---------------- 盘中行情快照 ----------------
+    def _snapshot_batch(self, batch: list[str], depth: int = 0
+                        ) -> tuple[list[dict[str, Any]], list[str], int]:
+        """取一批快照，失败时**只丢弃真正无效的代码**，保住同批其余。
+
+        为什么必须这么做：上游把一批 500 只当**整体**校验，一个它不认识的代码
+        就让整批 500 只全部失败。实测 2026-10-08：因 *ST元道（301139）一只
+        无法识别，一次丢掉 515 只 = 全市场 9.6%，且丢的是代码顺序相邻的一整批
+        —— 这种缺失不报错、不中断任务，只会让当天数据**静默变少**。
+
+        处置策略（按代价从低到高）：
+          1. 报错点名了代码（`Unknown A-share thscode: 301139.SZ`）→ 剔除它重试，
+             代价仅 +1 个请求；
+          2. 报错没点名、但确属**业务错误**（上游拒绝这批）→ 二分拆半递归定位；
+          3. 深度超限（防无限递归）或已到单只 → 丢弃它并记日志。
+
+        ⚠️ **只有业务错误才做逐级定位**。网络/5xx/限流类异常必须原样放弃该批：
+        否则一次网络抖动会触发二分递归，把 500 只拆成 ~500 次单只请求 ——
+        既耗时数分钟，又必然撞上 15 次/分钟的限流，把一个瞬时故障放大成
+        持续数分钟的自我封禁。
+
+        返回 (items, 上游不认的代码, 因非业务错误放弃的只数)。
+        """
+        if not batch:
+            return [], [], 0
+        try:
+            data = self._get(
+                PATH_SNAPSHOT,
+                {"thscodes": ",".join(self._thscode(c) for c in batch)},
+            )
+        except Exception as exc:  # noqa: BLE001 - 单批任何异常都不应中断整次采集
+            msg = str(exc)
+            bad_err = bool(_BAD_THSCODE_RE.search(msg))
+            biz_err = bad_err or "业务错误" in msg
+            if not biz_err:
+                logger.warning(
+                    "行情快照批次失败（网络/服务异常，放弃 %d 只，不拆批重试）：%s",
+                    len(batch), msg[:140],
+                )
+                return [], [], len(batch)
+            hit = _BAD_THSCODE_RE.search(msg)
+            if hit and len(batch) > 1:
+                bad = hit.group(1)
+                rest = [c for c in batch if c != bad]
+                if len(rest) < len(batch):
+                    items, dropped, failed = self._snapshot_batch(rest, depth + 1)
+                    return items, [bad, *dropped], failed
+                # 点名的代码不在本批（理论不该发生）——退回二分，别误删好代码
+                logger.warning("快照报错点名的 %s 不在本批，改用二分定位", bad)
+            if len(batch) > 1 and depth < 12:
+                mid = len(batch) // 2
+                left, drop_l, fail_l = self._snapshot_batch(batch[:mid], depth + 1)
+                right, drop_r, fail_r = self._snapshot_batch(batch[mid:], depth + 1)
+                return left + right, drop_l + drop_r, fail_l + fail_r
+            logger.warning("行情快照丢弃单只 %s：%s", batch[0], msg[:120])
+            return [], [batch[0]], 0
+        return list(data.get("item") or []), [], 0
+
     def snapshot(self, codes: list[str]) -> pd.DataFrame:
         """批量拉取实时行情快照（分批，每批 `SNAPSHOT_BATCH` 只）。
 
@@ -654,36 +716,36 @@ class HithinkCollector:
         high_price / low_price / price_change_ratio_pct / volume / turnover`。
         字段归一化与派生（量比等）由调用方负责 —— 本层只保证"取到"。
 
-        **单批失败只跳过该批并记日志**，不让整次采集失败：盘中快照是每日一次性
-        动作，一个批次因个别代码异常而中断，会导致当天完全没有数据。
+        **单批失败不再整批丢弃**：改为逐级定位到真正无效的代码（见 `_snapshot_batch`）。
+        整批丢弃的代价太大 —— 一个无效代码 = 500 只全丢（实测丢过 9.6% 的全市场），
+        而快照是**每天一次性、不可回补**的数据。
         """
         uniq = [c for c in dict.fromkeys(codes) if c]
         if not uniq:
             return pd.DataFrame()
 
         frames: list[pd.DataFrame] = []
+        dropped: list[str] = []
         failed = 0
         for i in range(0, len(uniq), SNAPSHOT_BATCH):
             batch = uniq[i : i + SNAPSHOT_BATCH]
-            try:
-                data = self._get(
-                    PATH_SNAPSHOT,
-                    {"thscodes": ",".join(self._thscode(c) for c in batch)},
-                )
-            except Exception as exc:  # noqa: BLE001
-                failed += len(batch)
-                logger.warning(
-                    "行情快照批次失败（跳过 %d 只，第 %d 批）：%s",
-                    len(batch), i // SNAPSHOT_BATCH + 1, str(exc)[:140],
-                )
-                continue
-            items = data.get("item") or []
+            items, gone, fail = self._snapshot_batch(batch)
+            dropped.extend(gone)
+            failed += fail
             if items:
                 frames.append(pd.DataFrame(items))
 
+        if dropped:
+            # 必须把**具体代码**打出来：只说"跳过 500 只"无法排查，
+            # 而"哪些代码上游不认"本身是有价值的信息（可据此判断是退市、
+            # 改名还是上游数据缺口）。
+            logger.warning(
+                "行情快照丢弃 %d 只上游不认的代码（占 %d 只的 %.2f%%）：%s",
+                len(dropped), len(uniq), 100.0 * len(dropped) / len(uniq),
+                "、".join(dropped[:20]) + ("…" if len(dropped) > 20 else ""),
+            )
         if failed:
-            logger.warning("行情快照共跳过 %d 只（占 %d 只的 %.1f%%）",
-                           failed, len(uniq), 100.0 * failed / len(uniq))
+            logger.warning("行情快照因网络/服务异常放弃 %d 只（本次不重试，等下次采集）", failed)
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     def auction_snapshot(self, codes: list[str], stage: str = "final") -> list[dict[str, Any]]:
