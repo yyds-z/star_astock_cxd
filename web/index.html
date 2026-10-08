@@ -166,6 +166,9 @@
 let charts = {};
 
 const fmt = (v,d=2)=> (v===null||v===undefined||isNaN(v)) ? "-" : Number(v).toFixed(d);
+
+// 接口返回的文案里带 markdown 粗体标记（**x**），直接塞进 innerHTML 会露出星号。
+const md = s => String(s==null ? "" : s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
 const yi = v => (v===null||v===undefined) ? "-" : (v/1e8).toFixed(0)+"亿";
 const cls = v => v>0?"up":(v<0?"down":"muted");
 const pct = v => (v===null||v===undefined)?"-":(v>0?"+":"")+Number(v).toFixed(2)+"%";
@@ -364,14 +367,20 @@ function renderShadow(d){
   document.getElementById("deskDate").textContent =
     `信号日 ${d.signal_date}` + (d.snapshot_date
       ? `　实况 ${d.snapshot_date} ${d.snapshot_slot || ""}` : "　（该日尚无盘中快照，仅信号）");
-  rules.innerHTML = (d.rules || []).map(r => `<span>${r}</span>`).join("");
-  const ms = d.min_signal_score;
+  rules.innerHTML = (d.rules || []).map(r => `<span>${md(r)}</span>`).join("");
+  // 参数值一律从接口取（接口又取自 astock.shadow 的唯一读取点），页面不写死：
+  // 之前写死过一次的后果是「量 < 前 5 日均量 NaN%、信号分 ≥ undefined」。
+  const ms = d.min_signal_score, zw = d.zt_window_days, rd = d.recent_days;
+  // 裁判结论 + 已证伪的旧依据，都从接口取（唯一来源 astock/shadow/verdict.py）
+  const verdict = ((d.verdict && d.verdict.lines) || [])
+    .concat(d.verdict && d.verdict.falsified ? [d.verdict.falsified] : []);
   document.getElementById("deskLogic").innerHTML =
-    `逻辑：涨停基因（近 28 日有涨停且距上次 ≤10 天）`
-    + `+ 缩量（量 &lt; 前 5 日均量 ${(100 - ms)}%，即 <b>信号分 ≥ ${ms}</b>，低于此分不推荐）`
-    + `+ 不破位。　检验（2026-09-30 修订后，观察期选参 → 验证期检验）：`
-    + `验证期日均超额 <b>+1.258%</b>、t=<b>3.88</b>、次日涨停率 23.6%。`
-    + `<br>⚠️ 修订代价：每日候选从 ~36 只降到 ~9 只，分散度下降（单只权重 1/36 → 1/9）。`;
+    `<div>逻辑：涨停基因（近 ${zw} 个自然日有涨停且距上次 ≤${rd} 天）`
+    + `+ 缩量（量 &lt; 前 5 日均量 ${(100 - ms).toFixed(0)}%，即 <b>信号分 ≥ ${fmt(ms,0)}</b>，低于此分不推荐）`
+    + `+ 不破位。</div>`
+    // 裁判结论来自 /api/shadow/latest 的 verdict（唯一来源 astock/shadow/verdict.py）。
+    // 这里曾硬编码「验证期 +1.258%、t=3.88（通过）」，与报告的「未通过」直接相反。
+    + verdict.map(t => `<div class="warn" style="margin-top:4px;">⚠️ ${md(t)}</div>`).join("");
 
   const counts = d.status_counts || {};
   const states = Object.keys(counts);
@@ -387,7 +396,7 @@ function renderShadow(d){
   const hasSnap = !!(d.snapshot_date);
   const head = `<tr><th>代码</th><th>名称</th><th class="num">信号分</th>
     <th class="num">信号日收盘</th>${hasSnap?`<th class="num">现价</th><th class="num">涨幅</th><th class="num">量比</th>`:""}
-    <th class="num">连板</th><th class="num">距上次涨停</th><th>状态</th></tr>`;
+    <th class="num">近${zw}日涨停</th><th class="num">距上次涨停</th><th>状态</th></tr>`;
   const body = rows.map(r => `<tr onclick="gotoStock('${r.code}')">
       <td>${r.code}</td><td>${r.name||"-"}</td>
       <td class="num score">${fmt(r.signal_score,1)}</td>
@@ -398,10 +407,15 @@ function renderShadow(d){
       <td class="num">${r.zt20 ?? "-"}</td>
       <td class="num">${r.days_since_zt ?? "-"}</td>
       <td class="${SHADOW_CLS[r.status]||""}">${r.status}</td></tr>`).join("");
+  // 被过滤的原因要说对：展示层只做两条**可买性**过滤（信号日已封板 / 流动性不足），
+  // 而信号分截断发生在**生成时**（引擎侧）。此前这里写成「因信号分 < undefined 被过滤」，
+  // 既是错的归因，又暴露了一个接口从未提供过的字段。
+  const amtRule = (d.min_amount_avg20 > 0)
+    ? `，或前 20 日均成交额 &lt; ${fmt(d.min_amount_avg20 / 1e8, 2)} 亿` : "";
   box.innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>
     <div class="muted" style="font-size:12px;margin-top:8px;">
       共 ${rows.length} 只（信号日全量 ${d.count + (d.filtered_out || 0)} 只，`
-    + `其中 ${d.filtered_out || 0} 只因信号分 &lt; ${d.min_signal_score} 被过滤）· `
+    + `另有 ${d.filtered_out || 0} 只未进入名单：信号日已封板、收盘买不进${amtRule}）· `
     + `信号分是<b>缩量程度</b>，不是胜率排序 —— 请等权分散持有，不要重仓前几名。
     </div>`;
 }

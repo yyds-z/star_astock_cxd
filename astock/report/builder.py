@@ -613,27 +613,33 @@ class ReportBuilder:
         每只候选会标注**此刻实况与可执行性**——这是「14:00 决策」的落地形式；
         18:30 生成报告时快照通常尚不存在，则只呈现信号本身。
         """
-        # 准入条件（信号分下限 + 流动性下限）：与引擎**同一个读取点**，
-        # 报告不自己实现口径。
-        from astock.shadow import shadow_min_amount_avg20, shadow_min_signal_score
+        # 准入条件（信号分下限 + 流动性下限）与基因窗口：与引擎**同一个读取点**，
+        # 报告不自己实现口径、也不自己写死参数值。
+        from astock.shadow import (
+            shadow_gene_window,
+            shadow_min_amount_avg20,
+            shadow_min_signal_score,
+        )
+        from astock.shadow.verdict import VERDICT_LINES
 
         vol_max = 1.0 - shadow_min_signal_score() / 100.0
         min_amt = shadow_min_amount_avg20()
+        zt_days, recent_days = shadow_gene_window()
         amt_txt = (f"，前 20 日均成交额 ≥ {min_amt / 1e8:g} 亿" if min_amt > 0 else "")
         lines: list[str] = [
             "## 一、影子信号候选（观察）",
             "",
-            f"> 逻辑：涨停基因（近 28 日有涨停、距上次 ≤10 天）+ 缩量（量 < 前 5 日均量 {vol_max:.0%}）"
+            f"> 逻辑：涨停基因（近 {zt_days} 个自然日有涨停、距上次 ≤{recent_days} 天）"
+            f"+ 缩量（量 < 前 5 日均量 {vol_max:.0%}）"
             f"+ 不破位（收 ≥ 前 5 日均价 98%）+ **不买信号日已封板**{amt_txt}。",
             "> 执行口径（**可实现**）：信号日次日**开盘**买入 → 再次日收盘卖出（T+1 下最早合法卖点）。",
-            "> ⚠️ **裁判结论（2026-10-08，可实现口径）：未通过检验。**"
-            "全接收等权日均超额 −0.016%（t=−0.12），样本外为 0"
-            "（观察期 −0.005% / 验证期 −0.027%）。名单仅供观察，不构成投资建议。",
-            "> ⚠️ 旧口径（信号日收盘买）曾显示 +0.650%（t=5.58）—— 那笔收益 100% 来自"
-            "**当日已封板、收盘买不进**的票（占候选 15.3%），该数字已作废。",
-            "> 执行规则：等权分散（收益来自约 1/4 命中涨停的尾部）、市价买入不追板。",
-            "",
         ]
+        # 裁判结论只有一份（astock/shadow/verdict.py），报告不再自己写一遍：
+        # 此前报告写「未通过」、网页写「通过（+1.258%、t=3.88）」，用户看到哪个结论
+        # 取决于他打开的是文件还是网页。
+        lines.extend(f"> ⚠️ {line}" for line in VERDICT_LINES)
+        lines.append("> 执行规则：等权分散（收益来自约 1/4 命中涨停的尾部）、市价买入不追板。")
+        lines.append("")
         data_date = str(result.get("data_date"))
         plan_date = str(result.get("plan_date") or "")
         # 按**可买性**过滤（封板买不进 + 流动性下限），不按参数指纹：
@@ -708,7 +714,8 @@ class ReportBuilder:
                 f"当日另有 {dropped} 只不满足条件（缩量不足／已封板／流动性）。"
             )
             lines.append("")
-            lines.append("| 代码 | 名称 | 信号分 | 信号日收盘 | 快照现价 | 快照涨幅 | 快照量比 | 信号量比 | 连板 | 距涨停(日) | 状态 |")
+            lines.append("| 代码 | 名称 | 信号分 | 信号日收盘 | 快照现价 | 快照涨幅 | 快照量比 | 信号量比 | "
+                         f"近{zt_days}日涨停 | 距涨停(日) | 状态 |")
             lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
             for _, r in picks.iterrows():
                 price = "-" if pd.isna(r.get("price")) else f"{float(r['price']):.2f}"
@@ -726,7 +733,7 @@ class ReportBuilder:
                 f"当日另有 {dropped} 只不满足条件）。"
             )
             lines.append("")
-            lines.append("| 代码 | 名称 | 信号分 | 信号日收盘 | 信号量比 | 连板 | 距上次涨停(日) |")
+            lines.append(f"| 代码 | 名称 | 信号分 | 信号日收盘 | 信号量比 | 近{zt_days}日涨停 | 距上次涨停(日) |")
             lines.append("|---|---|---|---|---|---|---|")
             for _, r in picks.iterrows():
                 lines.append(

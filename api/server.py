@@ -136,65 +136,12 @@ def market_history(days: int = Query(120, ge=5, le=2000)) -> dict[str, Any]:
     return {"records": list(reversed(rows))}
 
 
-# ---------------- 推荐 ----------------
-@app.get("/api/recommend/latest")
-def recommend_latest(offset: int = Query(0, ge=0, le=60)) -> dict[str, Any]:
-    _need_snapshot()
-    reader = get_reader()
-    dates = reader.records(
-        "SELECT DISTINCT rec_date FROM recommend ORDER BY rec_date DESC LIMIT ?",
-        "recommend",
-        [offset + 1],
-    )
-    if len(dates) <= offset:
-        return {"available": False, "records": []}
-
-    target = dates[offset]["rec_date"]
-    records = reader.records(
-        "SELECT * FROM recommend WHERE rec_date = ? ORDER BY tier, tier_rank",
-        "recommend",
-        [target],
-    )
-    for r in records:
-        for key, default in (("reasons", "[]"), ("score_detail", "{}")):
-            try:
-                r[key] = json.loads(r.get(key) or default)
-            except (TypeError, ValueError):
-                r[key] = [] if key == "reasons" else {}
-
-    review_map: dict[str, dict] = {}
-    if records:
-        reviews = reader.records(
-            "SELECT rec_id, next_pct_chg, next_high_pct, next_low_pct, hold3_pct, result, next_date "
-            "FROM review WHERE rec_date = ?",
-            "review",
-            [target],
-        )
-        review_map = {r["rec_id"]: r for r in reviews}
-    for r in records:
-        r["review"] = review_map.get(r["rec_id"])
-
-    return {
-        "available": True,
-        "rec_date": target,
-        "trade_date": records[0]["trade_date"] if records else None,
-        "market_state": records[0]["market_label"] if records else None,
-        "market_state_code": records[0]["market_state"] if records else None,
-        "records": records,
-    }
-
-
-@app.get("/api/recommend/history")
-def recommend_history(days: int = Query(30, ge=1, le=365)) -> dict[str, Any]:
-    _need_snapshot()
-    # INTERVAL 不支持参数占位符，days 已由 FastAPI 限定为 1~365 的整数，可安全内联
-    return {
-        "records": get_reader().records(
-            "SELECT * FROM recommend WHERE rec_date >= (SELECT MAX(rec_date) FROM recommend) "
-            f"- INTERVAL {int(days)} DAY ORDER BY rec_date DESC, tier, tier_rank",
-            "recommend",
-        )
-    }
+# ---------------- 推荐：两个端点已于 2026-10-08 删除 ----------------
+# /api/recommend/latest 与 /api/recommend/history 读的是展示快照里的
+# `recommend` / `review` 视图，也就是主链路（8 策略 → 评分 → 15 只配额）的候选。
+# 那些策略经 250 日体检全部无可实现 alpha，表与视图已随主链路移除。
+# 删除理由还有一条：**它们已无任何调用者** —— 页面只调 /api/shadow/*，
+# 留着只是让 `/api/recommend/*` 对着不存在的视图报错/返回空。
 
 
 # ---------------- 影子信号（唯一候选来源，处于纸面跟踪观察期）----------------
@@ -331,6 +278,10 @@ def shadow_latest(offset: int = Query(0, ge=0, le=60)) -> dict[str, Any]:
     counts: dict[str, int] = {}
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
+    from astock.shadow import shadow_gene_window
+    from astock.shadow.verdict import CHECKUP_DATE, FALSIFIED_NOTE, VERDICT_LINES, VERDICT_PASSED
+
+    zt_days, recent_days = shadow_gene_window()
     return {
         "available": True,
         "signal_date": sig_date,
@@ -339,7 +290,21 @@ def shadow_latest(offset: int = Query(0, ge=0, le=60)) -> dict[str, Any]:
         "count": len(rows),
         "status_counts": counts,
         "vol_ratio_max": round(vol_max, 2),
+        # 页面用它写「量 < 前 5 日均量 X%，即 信号分 ≥ Y」。曾经页面取的是
+        # `min_signal_score` 而接口从未给过这个键 → 渲染成 "NaN%" / "undefined"。
+        "min_signal_score": round(_shadow_min_score(), 1),
         "min_amount_avg20": round(_shadow_min_amt(), 0),
+        # 参数窗口：页面据此标注列名（近 N 日涨停）与逻辑说明，不必自己写死 28/10
+        "zt_window_days": zt_days,
+        "recent_days": recent_days,
+        # 裁判结论：唯一来源 astock/shadow/verdict.py，页面照原样渲染。
+        # 此前页面硬编码了相反的结论（"验证期 +1.258%、t=3.88，通过"）。
+        "verdict": {
+            "date": CHECKUP_DATE,
+            "passed": VERDICT_PASSED,
+            "lines": list(VERDICT_LINES),
+            "falsified": FALSIFIED_NOTE,
+        },
         "filtered_out": dropped,
         "total_on_date": total_on_date,
         "records": rows,
@@ -495,6 +460,12 @@ def equity(include_benchmark: bool = Query(True)) -> dict[str, Any]:
     if not curves:
         return {"available": False, "dates": [], "curves": []}
     dates = curves[0].dates
+    # 裁判结论与"已证伪的旧依据"都取唯一来源，不在这里写死。
+    # 这里曾写「可信口径是验证期检验结果：日均超额 +1.258%、t=3.88」——
+    # 那句话已被证伪（见 astock/shadow/verdict.py 的 FALSIFIED_NOTE），
+    # 且与报告给出的「未通过」正好相反。
+    from astock.shadow.verdict import CHECKUP_DATE, FALSIFIED_NOTE, VERDICT_PASSED
+
     return {
         "available": True,
         "run_id": run_id,
@@ -507,8 +478,10 @@ def equity(include_benchmark: bool = Query(True)) -> dict[str, Any]:
         # "宁可说清局限，也不给一个看起来很好的数"。
         "caveat": (
             "⚠️ 影子曲线使用了在**同期数据**上选定的信号分阈值（在样本内），"
-            "全区间数字含选择偏差、不可直接外推。可信口径是验证期检验结果："
-            "（2026-04-03 起 122 个交易日）日均超额 +1.258%、t=3.88。"
+            "全区间数字含选择偏差、不可直接外推。"
+            f"裁判结论（{CHECKUP_DATE}，可实现口径）：{'通过' if VERDICT_PASSED else '未通过'}检验。"
+            f"{FALSIFIED_NOTE}"
+            "完整结论见 /api/shadow/latest 的 verdict 字段；"
             "实际表现以 v1.0 上线后（2026-09-30 起）的纸面跟踪为准。"
         ),
         "curves": [
