@@ -7,6 +7,7 @@
 这里集中定义"什么算收益"，并要求所有消费方（报告/回测/界面/参数网格）调用它。
 """
 
+from astock.eval.checkup import score_strategy, strategy_hits
 from astock.eval.judge import (
     EXEC_COST,
     attach_benchmark,
@@ -27,6 +28,8 @@ __all__ = [
     "format_table",
     "picks_with_returns",
     "pool_benchmark",
+    "score_strategy",
     "split_out_of_sample",
+    "strategy_hits",
     "summarise",
 ]

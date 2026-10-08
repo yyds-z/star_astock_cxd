@@ -74,6 +74,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_check = sub.add_parser("check", help="数据体检：检查无数据标记与数据滞后情况")
     p_check.add_argument("--limit", type=int, default=30, help="每类最多显示多少条")
 
+    # 策略体检：与"数据体检"（check）不同，这个跑的是**评价**——
+    # 对每个策略生成全历史候选，用可实现口径给成绩并做样本外判定。
+    p_cu = sub.add_parser("checkup", help="策略体检：用可实现口径评估各策略并给出样本外判定")
+    p_cu.add_argument("--days", type=int, default=250, help="回看交易日数（默认 250）")
+    p_cu.add_argument("--only", type=str, default=None, help="只体检指定策略（逗号分隔）")
+
     p_export = sub.add_parser("export", help="导出展示层快照（Web 端只读这份 Parquet）")
     p_export.add_argument("--bars-days", type=int, default=250, help="个股 K 线快照保留的交易日数")
 
@@ -1332,6 +1338,44 @@ def _parse_date(value: str | None):
     return _d.fromisoformat(value)
 
 
+def cmd_checkup(args) -> int:
+    """策略体检：对每个策略跑全历史候选，用统一裁判给出可实现口径成绩。
+
+    这是"策略去留"的唯一依据 —— 主链路回测只记最终入选的 15 只，
+    回答不了"turtle_trade 本身准不准"（它每天命中 76 只）。
+    """
+    from astock.eval.checkup import collect_hits, format_report, score_strategy
+    from astock.eval.judge import pool_benchmark
+    from astock.storage.db import get_storage
+    from astock.strategy import build_strategies
+
+    storage = get_storage()
+    only = {s.strip() for s in (args.only or "").split(",") if s.strip()}
+    strategies = [s for tier in build_strategies().values() for s in tier
+                  if not only or s.name in only]
+    days_df = storage.query_df(
+        "SELECT DISTINCT date FROM dws_feature ORDER BY date DESC LIMIT ?", [int(args.days)])
+    days = sorted(days_df["date"].tolist())
+    if not days:
+        print("因子表为空，无法体检。请先跑：python -m astock.cli factor --all")
+        return 1
+
+    print(f"体检区间：{days[0]} ~ {days[-1]}（{len(days)} 个交易日）")
+    print(f"策略数：{len(strategies)}　正在逐日生成候选（每日只加载一次截面）…")
+    bench = pool_benchmark(storage)
+    all_hits = collect_hits(storage, strategies, days)
+    results = []
+    for s in strategies:
+        hits = all_hits[s.name]
+        if hits.empty:
+            results.append({"label": s.label, "days": 0, "verdict": "无信号"})
+            continue
+        results.append(score_strategy(hits, bench, s.label, n_tests=len(strategies)))
+    print()
+    print(format_report(results, len(strategies)))
+    return 0
+
+
 def cmd_check(args) -> int:
     """数据体检：区分「真退市 / 长期停牌」与「采集失败」，并列出滞后股票。"""
     from astock.storage.db import get_storage
@@ -1389,6 +1433,7 @@ COMMANDS = {
     "serve": cmd_serve,
     "status": cmd_status,
     "check": cmd_check,
+    "checkup": cmd_checkup,
     "export": cmd_export,
     "sector": cmd_sector,
     "limit-pool": cmd_limit_pool,
