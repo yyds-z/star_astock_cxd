@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,27 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "settings.yaml"
+
+# 指纹只覆盖「会影响信号本身」的配置。
+# 2026-10-08：主链路（strategy/scoring）删除后，含义从「策略/评分参数」变为
+# **影子信号参数** —— 它仍是 G3 验收时区分「修订前/修订后」样本的唯一依据
+# （例如 2026-09-30 把信号分下限从 30 改到 50，必须能分段统计）。
+PARAM_KEYS = ("shadow_gene", "universe", "market_regime")
+
+
+def params_version() -> str:
+    """当前生效参数的指纹，逐条落库，用于追踪「哪套参数产生了哪条记录」。"""
+    cfg = get_config()
+    payload = {k: cfg.get(k, {}) for k in PARAM_KEYS}
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:10]
+
+
+def report_dir() -> Path:
+    """每日报告的落盘目录（自动创建）。"""
+    p = get_config().data_dir / "reports"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 class Config:

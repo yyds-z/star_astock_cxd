@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""样本外验证层：历史逐日回放 + 远期收益统计。
+"""回测展示层：净值曲线与校准曲线。
 
-与「真实每日运行」的区别：回放时严格按照 as-of 语义取数据，
-不使用任何未来信息（股票池、因子、市场状态全部按当日截面）。
+2026-10-08：回测引擎（`engine` / `metrics` / `report`）已随主链路删除 ——
+它评估的对象正是那 8 个策略，而统一体检证明它们全部无可实现 alpha。
+这里只保留**曲线的构造与统计**：影子信号的净值曲线、校准曲线仍由它渲染
+（`api/server.py` 的 `/api/equity`、`/api/calibration`），
+且与页面复用同一套口径与显著性统计。
 """
 
-from astock.backtest.engine import BacktestEngine
-from astock.backtest.metrics import summarise
+from astock.backtest import charts
 
-__all__ = ["BacktestEngine", "summarise"]
+__all__ = ["charts"]

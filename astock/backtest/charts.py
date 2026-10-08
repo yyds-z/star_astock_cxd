@@ -40,8 +40,7 @@ C_PANEL = "#161b22"
 C_LINE = "#242c3a"
 C_TEXT = "#e6edf3"
 C_MUTED = "#8b949e"
-C_MAIN = "#58a6ff"     # 主链路（观察池）
-C_SHADOW = "#f85149"   # 影子信号（决策依据，红=A股强势色）
+C_SHADOW = "#f85149"   # 影子信号（唯一决策依据，红=A股强势色）
 C_BENCH = "#8b949e"    # 基准（灰，不抢眼）
 
 
@@ -55,7 +54,7 @@ class Curve:
     name: str
     dates: list[str] = field(default_factory=list)
     nav: list[float] = field(default_factory=list)      # 累计净值，起点 1.0
-    color: str = C_MAIN
+    color: str = C_SHADOW
     dashed: bool = False
     note: str = ""                                       # 口径说明（显示在图例）
     daily: pd.Series | None = None                       # 日收益（用于统计）
@@ -154,25 +153,8 @@ def attach_excess(curves: Sequence[Curve],
     return out
 
 
-def load_main_equity(storage: Storage, run_id: str) -> Curve:
-    """主链路净值：按 `data_date` 等权合并当日 15 只，口径 = 次日开盘买→再次日收盘卖。
-
-    ⚠️ 近似说明：该策略持仓跨 2 个交易日，逐日复利隐含"每日全额再平衡"假设。
-    真实资金会在相邻两日之间重叠占用。图上必须标注这一点。
-    """
-    df = storage.query_df(
-        "SELECT CAST(data_date AS VARCHAR) AS d, AVG(ret_exit_d1c) AS r "
-        "FROM ads_backtest WHERE run_id = ? AND ret_exit_d1c IS NOT NULL "
-        "GROUP BY data_date ORDER BY data_date",
-        [run_id],
-    )
-    if df.empty:
-        return Curve(name="主链路（观察池）", color=C_MAIN,
-                     note="无数据：请先跑 backtest 且该轮次需含 ret_exit_d1c 列")
-    s = pd.Series((df["r"] / 100.0 - COST_ROUND_TRIP).to_numpy(), index=df["d"].tolist())
-    c = _compound(s)
-    c.name, c.color, c.note = "主链路（观察池）", C_MAIN, "次日开盘买→再次日收盘卖，扣0.3%"
-    return c
+# load_main_equity 已于 2026-10-08 删除：它读 ads_backtest（主链路回测），
+# 而该表随 8 个策略一并移除（体检证明全部无可实现 alpha）。
 
 
 def load_shadow_equity(storage: Storage, start: str | None = None,
@@ -242,35 +224,30 @@ def load_benchmark(storage: Storage, start: str | None = None,
     return c
 
 
-def build_curves(storage: Storage | None = None, run_id: str | None = None,
+def build_curves(storage: Storage | None = None,
                  start: str | None = None, end: str | None = None) -> list[Curve]:
-    """构建三条曲线并**对齐到共同区间**（否则长度不同的曲线无法对照）。"""
+    """构建影子信号与基准两条曲线，并**对齐到共同区间**（长度不同无法对照）。
+
+    2026-10-08：主链路曲线随主链路删除。现在只剩两个对象：
+    「影子信号（唯一决策依据）」与「同池等权基准（诚实参照）」——
+    曲线的意义正是回答"影子到底比随便买强多少"。
+    """
     st = storage or get_storage()
-    if run_id is None:
-        run_id = st.query_value("SELECT MAX(run_id) FROM ads_backtest") or ""
-    main = load_main_equity(st, run_id)
     shadow = load_shadow_equity(st, start, end)
     bench = load_benchmark(st, start, end)
 
     # 对齐到共同日期 + 计算相对基准的日度超额与 t（与展示层共用同一实现）
-    out = attach_excess([shadow, main, bench])
+    out = attach_excess([shadow, bench])
     if out and out[0].dates:
-        logger.info("曲线区间对齐：%s ~ %s（共同 %d 个交易日，run_id=%s）",
-                    out[0].dates[0], out[0].dates[-1], len(out[0].dates), run_id)
+        logger.info("曲线区间对齐：%s ~ %s（共同 %d 个交易日）",
+                    out[0].dates[0], out[0].dates[-1], len(out[0].dates))
     return list(out)
 
 
 # ============================================================
 # 校准曲线（评分分档 → 实际收益）
 # ============================================================
-def calibration_main(storage: Storage, run_id: str, bins: int = 10) -> pd.DataFrame:
-    """主链路：按 final_score 分位 → 该档平均可实现收益（%）。"""
-    return _calibration(
-        storage,
-        f"""SELECT final_score AS score, ret_exit_d1c AS ret FROM ads_backtest
-            WHERE run_id = '{run_id}' AND ret_exit_d1c IS NOT NULL""",
-        bins,
-    )
+# calibration_main 已于 2026-10-08 删除（依赖 ads_backtest.final_score，同批移除）。
 
 
 def calibration_shadow(storage: Storage, bins: int = 10) -> pd.DataFrame:
@@ -470,10 +447,10 @@ def render_calibration_svg(cal: pd.DataFrame, label: str = "评分分位",
     s.append(f'<line x1="{th.pad_l}" y1="{y0:.1f}" x2="{th.w - th.pad_r}" y2="{y0:.1f}" '
              f'stroke="{C_MUTED}" stroke-dasharray="3 3"/>')
     pts = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, v in enumerate(vals))
-    s.append(f'<polyline points="{pts}" fill="none" stroke="{C_MAIN}" stroke-width="1.8"/>')
+    s.append(f'<polyline points="{pts}" fill="none" stroke="{C_SHADOW}" stroke-width="1.8"/>')
     for i, v in enumerate(vals):
         cnt = int(cal["n"].iloc[i]) if "n" in cal.columns else 0
-        s.append(f'<circle cx="{px(i):.1f}" cy="{py(v):.1f}" r="3.2" fill="{C_MAIN}"/>')
+        s.append(f'<circle cx="{px(i):.1f}" cy="{py(v):.1f}" r="3.2" fill="{C_SHADOW}"/>')
         s.append(f'<text x="{px(i):.1f}" y="{py(v) + (14 if v >= 0 else -7):.1f}" '
                  f'fill="{C_MUTED}" font-size="8.5" text-anchor="middle">{cnt}</text>')
         s.append(f'<text x="{px(i):.1f}" y="{th.h - th.pad_b + 16}" fill="{C_MUTED}" '

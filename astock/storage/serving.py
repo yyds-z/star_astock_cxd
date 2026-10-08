@@ -33,30 +33,9 @@ logger = get_logger("storage.serving")
 SNAPSHOT_QUERIES: dict[str, str] = {
     "dim_stock": "SELECT * FROM dim_stock",
     "market_regime": "SELECT * FROM dws_market_regime ORDER BY date",
-    "recommend": """
-        SELECT * FROM ads_recommend
-        WHERE rec_date >= (SELECT MAX(rec_date) FROM ads_recommend) - INTERVAL 180 DAY
-        ORDER BY rec_date DESC, tier, tier_rank
-    """,
-    "review": """
-        SELECT * FROM ads_review
-        WHERE rec_date >= (SELECT MAX(rec_date) FROM ads_review) - INTERVAL 180 DAY
-        ORDER BY rec_date DESC
-    """,
-    "feature_latest": """
-        SELECT f.*, s.name, s.board, i.industry_name AS industry
-        FROM dws_feature f
-        LEFT JOIN dim_stock s ON s.code = f.code
-        LEFT JOIN (
-            SELECT code, industry_name FROM (
-                SELECT code, industry_name,
-                       ROW_NUMBER() OVER (PARTITION BY code
-                                          ORDER BY is_primary DESC, source) AS rn
-                FROM dim_stock_industry
-            ) t WHERE rn = 1
-        ) i ON i.code = f.code
-        WHERE f.date = (SELECT MAX(date) FROM dws_feature)
-    """,
+    # "recommend"（观察池 ads_recommend）、"feature_latest"（因子宽表 dws_feature）、
+    # "review"（ads_review）三条快照已于 2026-10-08 随主链路删除 ——
+    # 它们导出的都是那 8 个策略的产物（候选、因子面板、候选复盘）。
     # 板块强度保留两个分类体系（sw / sina），由前端按需筛选；
     # 只留最近 120 个交易日，避免快照体积过大。
     "sector_strength": """
@@ -78,27 +57,9 @@ SNAPSHOT_QUERIES: dict[str, str] = {
         SELECT * FROM dwd_intraday_snapshot
         WHERE date = (SELECT MAX(date) FROM dwd_intraday_snapshot)
     """,
-    # ---- 主链路净值：按数据日的可实现收益（回测明细 → 聚合成 ~490 行）----
-    # 取**区间最长**的轮次而不是最新轮次：净值曲线需要足够长的窗口才有意义，
-    # 样本短（如 2 个月）时结论会随区间翻转 —— 实测同一策略全区间跑输基准
-    # 12.8pp、近一年跑赢 24.6pp。轮次 id 一并导出，供前端标注数据来源。
-    "backtest_daily": """
-        SELECT run_id, CAST(data_date AS VARCHAR) AS d, AVG(ret_exit_d1c) AS r, COUNT(*) AS n
-        FROM ads_backtest
-        WHERE ret_exit_d1c IS NOT NULL AND run_id = (
-            SELECT run_id FROM ads_backtest GROUP BY run_id
-            ORDER BY COUNT(DISTINCT data_date) DESC, run_id DESC LIMIT 1
-        )
-        GROUP BY run_id, data_date ORDER BY data_date
-    """,
-    # ---- 校准曲线原始点（分数 + 可实现收益），同一轮次、只留两列 ----
-    "backtest_scores": """
-        SELECT final_score, ret_exit_d1c FROM ads_backtest
-        WHERE ret_exit_d1c IS NOT NULL AND final_score IS NOT NULL AND run_id = (
-            SELECT run_id FROM ads_backtest GROUP BY run_id
-            ORDER BY COUNT(DISTINCT data_date) DESC, run_id DESC LIMIT 1
-        )
-    """,
+    # "backtest_daily"（主链路净值）与 "backtest_scores"（主链路校准曲线原始点）
+    # 已于 2026-10-08 随 ads_backtest（主链路回测）一并删除。
+    # 影子的净值/校准不需要预导快照：它们由 shadow 快照现算（api/server.py）。
 }
 
 
@@ -155,8 +116,7 @@ def export(storage: Storage | None = None, bars_days: int = 250) -> dict[str, An
         """,
     )
 
-    # 策略命中统计（由 daily 流程写入 dws_market_regime.detail 之外，这里单独落一张表）
-    dump("strategy_stats", "SELECT * FROM sys_strategy_stats")
+    # strategy_stats（各策略命中数）已随策略层删除
 
     # 概览信息（供前端顶部状态栏使用，避免每次都查库）
     summary = {
@@ -164,11 +124,7 @@ def export(storage: Storage | None = None, bars_days: int = 250) -> dict[str, An
         "bars": int(storage.table_count("dwd_daily_bar")),
         "latest_bar_date": _as_str(storage.latest_trade_date()),
         "latest_trade_date": _as_str(storage.latest_open_trade_date()),
-        "feature_date": _as_str(storage.latest_trade_date("dws_feature")),
-        "rec_days": int(
-            storage.query_value("SELECT COUNT(DISTINCT rec_date) FROM ads_recommend", default=0) or 0
-        ),
-        "review_rows": int(storage.table_count("ads_review")),
+        # feature_date / rec_days / review_rows 已随主链路（因子宽表、观察池、候选复盘）删除
         # ---- v1.0 契约的三项验收指标（G1/G2/G3），前端顶部看板直接读这里 ----
         # G1：影子信号每日产出且被结算 —— 信号日数与最新信号日
         "shadow_rows": int(storage.table_count("ads_shadow_pick")),

@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from astock.config import get_config
+from astock.config import get_config, params_version
 from astock.logger import get_logger, setup_logging
 
 
@@ -271,20 +271,31 @@ def cmd_regime(args) -> int:
 
 
 def cmd_daily(args) -> int:
-    from astock.recommend.engine import RecommendEngine
-    from astock.report.builder import ReportBuilder
-    from astock.review.reviewer import Reviewer
+    """每日流程：采集日线 → 涨停池 → 市场状态 → 影子信号 → 报告 → 快照导出。
 
-    # ---- 数据就绪预检（1 次请求，秒级）----
+    2026-10-08：**「选股」环节已删除**。原主链路（8 个策略 → 评分融合 → 15 只配额）
+    经 250 个交易日、可实现口径的样本外体检，8 个策略**全部无可实现 alpha**，
+    故连同评分器、配额、因子宽表、财务采集一并移除。
+
+    影子信号是**唯一的候选来源**，但它自身在可实现口径下也**未通过检验**
+    （见 ads_shadow_pick 的口径说明 / 报告影子板块的裁判结论），
+    因此系统当前处于**纸面跟踪观察期** —— 报告与页面都按这个定性呈现，
+    不给出"可执行名单"的说法。
+    """
+    from datetime import datetime, timedelta
+
+    from astock.data.collector import Collector
+    from astock.report.builder import ReportBuilder
+    from astock.storage.db import get_storage
+
+    # ---- 1) 数据就绪预检（1 次请求，秒级）----
     # 为什么不靠 data_ready_time：那只是**时钟**，无法知道行情源是否真的发布了。
     # 实测 16:08 时东财仍无当日日线，若不预检就会对全市场发出数千次注定失败的
     # 请求（既慢又可能触发封禁），最后还带着**上一个交易日**的数据走完流程 ——
-    # 生成口径错位的"今日推荐"并写进 ads_recommend，下次复盘才发现。
+    # 生成口径错位的"今日信号"并写进库，事后才发现。
     if not args.no_refresh:
         try:
             from datetime import date as _date
-
-            from astock.data.collector import Collector
 
             collector = Collector()
             try:
@@ -302,9 +313,9 @@ def cmd_daily(args) -> int:
                     probe, diag = collector.probe_source_date(today)
                     if probe is None:
                         print()
-                        print(f"✖ 数据源预检失败，已停止本次选股：{diag}")
+                        print(f"✖ 数据源预检失败，已停止本次运行：{diag}")
                         print("  原因：行情源可能正在维护或限流中。")
-                        print("  处理：稍后重跑；也可先跑 python scripts\\probe_hithink.py 看同花顺接口连通性。")
+                        print("  处理：稍后重跑；也可先跑 python scripts\\probe_hithink.py 看接口连通性。")
                         return 1
                     if probe < today:
                         print()
@@ -318,110 +329,111 @@ def cmd_daily(args) -> int:
         except Exception as exc:  # noqa: BLE001 - 预检失败不应阻断主流程
             print(f"提示：数据就绪预检未能完成，继续执行：{str(exc)[:120]}")
 
+    storage = get_storage()
+
+    # ---- 2) 同步行情到最新交易日（同花顺全市场导出，秒级）----
+    if not args.no_refresh:
+        collector = Collector(storage=storage)
+        try:
+            stats = collector.sync_daily(workers=args.workers)
+            print(f"行情同步：{stats}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"提示：行情同步失败，改用库内最新数据继续：{str(exc)[:160]}")
+        finally:
+            collector.close()
+
+    data_date = storage.latest_trade_date()
+    if data_date is None:
+        print("✖ 库内没有任何日线数据，无法继续（请先跑 backfill）")
+        return 1
+    print(f"数据日：{data_date}")
+
     use_llm = None
     if args.no_llm:
         use_llm = False
     elif args.llm:
         use_llm = True
 
-    engine = RecommendEngine()
-    result = engine.run(
-        refresh_data=not args.no_refresh,
-        recompute_factor=not args.no_factor,
-        workers=args.workers,
-    )
-    data_date = result.get("data_date")
-
-    # 涨停/炸板池（同花顺源，2 次请求约 9 秒；失败不阻塞主流程）。
-    # 必须在报告生成前采集，报告里的题材归因依赖它。
+    # ---- 3) 涨停/炸板池（影子基因依赖 dwd_limit_up）----
     try:
-        from datetime import datetime as _dt
-
-        from astock.data.hithink import HithinkCollector
         from astock.data.calendar import TradeCalendar
+        from astock.data.hithink import HithinkCollector
 
-        # data_date 是字符串且可能是「数据守卫回退后的上一交易日」。
-        # 不用 pandas：cli.py 模块级没有导入它（曾因此报 NameError）
-        pool_date = _dt.strptime(str(data_date), "%Y-%m-%d").date()
-        TradeCalendar(engine.storage).sync()
-        collector = HithinkCollector(engine.storage)
-        pool_stats = collector.sync(dates=[pool_date])
+        TradeCalendar(storage).sync()
+        pool_stats = HithinkCollector(storage).sync(dates=[data_date])
         # 不能用 logger：它是 main() 的局部变量，模块级不存在（真的踩过）
         print(
             "涨停池采集完成：%s（涨停 %d / 炸板 %d）"
-            % (pool_date, pool_stats["limit_up"], pool_stats["limit_break"])
+            % (data_date, pool_stats["limit_up"], pool_stats["limit_break"])
         )
-        # 龙虎榜采集已于 2026-10-08 移除：全代码库**零消费者**（原来的消费方
-        # dws_dragon_factor 等研究产物已在 9/30 清理时删除），它每天仍在消耗
-        # 1 次 API 请求并写入一张无人读的表。历史数据保留在库里（见台账）。
     except Exception as exc:  # noqa: BLE001
-        print(f"提示：涨停池采集失败（不影响选股）：{str(exc)[:140]}")
+        print(f"提示：涨停池采集失败（影子基因会因缺少涨停数据而退化）：{str(exc)[:140]}")
 
-    # 候选股财务（价值档的基本面输入）。
-    # 只采候选（约 15 只 × 3 次请求 ≈ 1 分钟）：全市场是 17 小时级任务，
-    # 由 `python -m astock.cli finance --all` 在夜间单独跑。
+    # ---- 4) 市场状态（**只用于展示**：市场宽度/涨停家数/炸板率）----
+    market: dict = {}
     try:
-        recs = result.get("recommendations")
-        if recs is not None and not recs.empty:
-            from astock.data.hithink import HithinkCollector as _Hithink
+        from astock.market.regime import MarketRegime
 
-            codes = [str(c) for c in recs["code"].tolist()][:20]
-            periods = _Hithink(engine.storage).collect_financials(codes)
-            print(f"候选股财务采集完成：{len(codes)} 只，{periods} 期报表")
+        regime = MarketRegime(storage)
+        regime.compute()
+        row = regime.latest() or {}
+        market = {
+            "state": row.get("state"),
+            "label": row.get("state_label"),
+            "confidence": row.get("confidence"),
+            "breadth_ma20": row.get("breadth_ma20"),
+            "breadth_ma60": row.get("breadth_ma60"),
+            "limit_up": row.get("limit_up_count"),
+            "limit_down": row.get("limit_down_count"),
+            "broken_rate": row.get("broken_rate"),
+            "top_sector": row.get("top_sector"),
+            "top_sector_share": row.get("top_sector_share"),
+        }
+        print("市场状态：%s（宽度 MA20 %s%%）"
+              % (row.get("state_label"), row.get("breadth_ma20")))
     except Exception as exc:  # noqa: BLE001
-        print(f"提示：财务采集失败（不影响选股）：{str(exc)[:120]}")
+        print(f"提示：市场状态计算失败（页面宽度区将缺数据）：{str(exc)[:140]}")
 
-    # 复盘 + 归因**必须排在生成报告之前**：报告的第一板块就是「昨日推荐回顾」，
-    # 数据来源是这里刚结算进 ads_review 的结果。反过来的话报告读到的还是 pending，
-    # 整个回顾板块会空掉（原来的顺序就是反的）。
-    # 两步都是幂等的，且任何失败都不影响后面的选股与报告。
-    try:
-        Reviewer().review()
-    except Exception as exc:  # noqa: BLE001
-        print(f"提示：复盘失败（不影响选股，但报告回顾板块会缺数据）：{str(exc)[:120]}")
-
-    try:
-        from astock.review.attribution import Attributor
-
-        attr = Attributor().run(limit=40)
-        if attr.get("attributed"):
-            print(f"复盘归因完成：{attr['attributed']} 条")
-    except Exception as exc:  # noqa: BLE001
-        print(f"提示：复盘归因失败（不影响选股）：{str(exc)[:120]}")
-
-    # 影子模块（v1.0 起**转正为决策依据**）：
-    #   settle —— 结算此前信号的实际收益（含 3/5 日，判据 ret1 OR ret5 IS NULL）
-    #   build  —— 用当日收盘数据生成次日候选（可实现口径的唯一有 alpha 信号）
+    # ---- 5) 影子信号：先结算历史，再用数据日生成次日候选 ----
+    # settle —— 结算此前信号的实际收益（含可实现口径 exec_*，判据见 settle 内注释）
+    # build  —— 用当日收盘数据生成次日候选
     # 必须排在报告之前：报告的影子板块读的就是刚落库的数据。
     try:
-        from datetime import datetime as _dt_s
-
         from astock.shadow import LimitGeneShadow
 
-        sh = LimitGeneShadow(storage=engine.storage)
+        sh = LimitGeneShadow(storage=storage)
         settled = sh.settle()
-        # 必须用**数据日**而不是今天：daily 的数据只到 data_date（守卫保证），
+        # 必须用**数据日**而不是今天：daily 的数据只到 data_date，
         # 用今天 build 会因"今日无 K 线"恒为空 —— 实测踩过。
-        # 数据日候选 = 次日开盘可买入的名单，这正是决策需要的时点。
-        picks = sh.build(_dt_s.strptime(str(data_date), "%Y-%m-%d").date())
-        print(
-            f"影子模块完成：结算 {settled} 行 | {data_date} 生成 {len(picks)} 只候选"
-            + ("（写入 ads_shadow_pick）" if len(picks) else "")
-        )
+        picks = sh.build(data_date)
+        print(f"影子模块完成：结算 {settled} 行 | {data_date} 生成 {len(picks)} 只候选")
     except Exception as exc:  # noqa: BLE001
-        print(f"提示：影子模块失败（不影响主流程）：{str(exc)[:140]}")
+        print(f"提示：影子模块失败（它是唯一候选来源，必须排查）：{str(exc)[:200]}")
 
-    builder = ReportBuilder()
-    report = builder.build(result, use_llm=use_llm)
+    # ---- 6) 报告 ----
+    try:
+        from astock.data.calendar import TradeCalendar
+
+        nxt = TradeCalendar(storage).open_dates(
+            data_date + timedelta(days=1), data_date + timedelta(days=30))
+        plan_date = nxt[0] if nxt else None
+    except Exception:  # noqa: BLE001 - 报告不应因日历缺失而失败
+        plan_date = None
+
+    result = {
+        "data_date": str(data_date),
+        "plan_date": str(plan_date) if plan_date else None,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "market": market,
+        "params_version": params_version(),
+    }
+    report = ReportBuilder(storage).build(result, use_llm=use_llm)
     print(ReportBuilder.console_summary(result, {"market_view": report.get("market_view")}))
 
-    # 导出展示层快照：Web 服务只读这份 Parquet，从而不会占用主库锁
+    # ---- 7) 导出展示层快照：Web 服务只读这份 Parquet，从而不会占用主库锁 ----
     from astock.storage.serving import export as export_serving
 
-    meta = export_serving(engine.storage)
-
-    # 刷新 Skill 库的实盘纸面跟踪数据
-    _sync_skills(engine.storage, "Skill 库")
+    meta = export_serving(storage)
 
     print(f"\n报告文件：{report['markdown_path']}")
     print(f"结构化结果：{report['json_path']}")

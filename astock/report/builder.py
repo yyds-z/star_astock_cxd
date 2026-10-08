@@ -30,8 +30,8 @@ from astock.llm.prompts import (
     template_recap_summary,
     template_risk,
 )
+from astock.config import report_dir
 from astock.logger import get_logger
-from astock.recommend.engine import RecommendEngine
 from astock.storage.db import Storage, get_storage
 
 logger = get_logger("report.builder")
@@ -174,23 +174,23 @@ class ReportBuilder:
 
     # ---------------- 主流程 ----------------
     def build(self, result: dict[str, Any], use_llm: bool | None = None) -> dict[str, Any]:
-        """生成报告。返回 {'markdown_path', 'json_path', 'summary', 'ai'}"""
+        """生成报告。返回 {'markdown_path', 'json_path', 'markdown', ...}
+
+        2026-10-08：**主链路删除后报告只剩影子板块 + 市场环境 + AI 解读**。
+        原「昨日推荐回顾」「候选股票（三档）」「基本面」三个板块随 ads_recommend
+        一并移除 —— 它们描述的对象（8 个策略的候选）已不存在。
+        影子自身的成绩回顾不在这里，而由 `ads_shadow_pick` 直接给出
+        （页面顶部 KPI 与 `/api/shadow/history`）。
+        """
         data_date = str(result.get("data_date"))
-        recs: pd.DataFrame = result.get("recommendations")
         market = result.get("market") or {}
 
-        ai = self._ai_section(market, result.get("strategy_stats") or {}, recs, use_llm)
+        ai = self._ai_section(market, {}, pd.DataFrame(), use_llm)
 
-        # 回顾板块（报告的第一板块）。数据来自 `ads_review`，
-        # 因此 daily 流程里「复盘」必须排在「生成报告」之前，
-        # 否则这里读到的还是 pending、整个板块会空掉。
-        recap = self._load_recap()
-        recap_ai = self._review_section(recap, use_llm)
-
-        md = self._render_markdown(result, market, recs, ai, recap, recap_ai)
-        report_dir = RecommendEngine.report_dir()
-        md_path = report_dir / f"report_{data_date}.md"
-        json_path = report_dir / f"report_{data_date}.json"
+        md = self._render_markdown(result, market, None, ai)
+        out_dir = report_dir()
+        md_path = out_dir / f"report_{data_date}.md"
+        json_path = out_dir / f"report_{data_date}.json"
         md_path.write_text(md, encoding="utf-8")
 
         payload = {
@@ -198,18 +198,9 @@ class ReportBuilder:
             "plan_date": result.get("plan_date"),
             "generated_at": result.get("generated_at"),
             "market": market,
-            "strategy_stats": result.get("strategy_stats"),
             "pool_size": result.get("pool_size"),
             "params_version": result.get("params_version"),
             "ai": ai,
-            "review": {
-                "stats": {k: v for k, v in recap.items() if k != "rows"},
-                "rows": recap.get("rows") or [],
-                "comment": recap_ai,
-            },
-            "recommendations": []
-            if recs is None or recs.empty
-            else json.loads(recs.to_json(orient="records", force_ascii=False)),
         }
         json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -447,23 +438,15 @@ class ReportBuilder:
         lines.append(f"- AI 解读：{'LLM' if ai.get('used_llm') else '本地模板（未启用或超预算）'}")
         lines.append("")
 
-        # ---- 第一板块：昨日推荐回顾（先看上次选得怎么样，再看今天选什么）----
-        lines.extend(self._render_review(recap or {}, recap_ai or {}))
-
-        # ---- 第二板块：影子信号（v1.0 唯一决策依据；在 recs 空判断之前，
-        #      保证主链路无候选时影子板块仍然出现）----
+        # ---- 第一板块：影子信号（唯一候选来源）----
         lines.extend(self._render_shadow(result))
 
-        # ---- 第三板块：主链路候选（已降级为信号观察池）----
-        lines.append("## 三、主链路候选（信号观察池）")
-        lines.append("")
-        lines.append("### 市场环境")
+        # ---- 第二板块：市场环境（只作背景，不参与决策）----
+        lines.append("## 二、市场环境")
         lines.append("")
         lines.append(f"- 市场状态：**{market.get('label')}**（置信度 {market.get('confidence')}）")
         lines.append(f"- 市场宽度：MA20 上方 {market.get('breadth_ma20')}% / MA60 上方 {market.get('breadth_ma60')}%")
         lines.append(f"- 涨跌停：涨停 {market.get('limit_up')} 家 / 跌停 {market.get('limit_down')} 家，炸板率 {market.get('broken_rate')}%")
-        w = market.get("weights") or {}
-        lines.append(f"- 档位权重：短线 {w.get('short')} / 波段 {w.get('swing')} / 价值 {w.get('value')}")
         if market.get("top_sector"):
             share = market.get("top_sector_share")
             extra = f"，占全市场涨停 {share}%" if share is not None else ""
@@ -583,7 +566,7 @@ class ReportBuilder:
         min_amt = shadow_min_amount_avg20()
         amt_txt = (f"，前 20 日均成交额 ≥ {min_amt / 1e8:g} 亿" if min_amt > 0 else "")
         lines: list[str] = [
-            "## 二、影子信号候选（观察）",
+            "## 一、影子信号候选（观察）",
             "",
             f"> 逻辑：涨停基因（近 28 日有涨停、距上次 ≤10 天）+ 缩量（量 < 前 5 日均量 {vol_max:.0%}）"
             f"+ 不破位（收 ≥ 前 5 日均价 98%）+ **不买信号日已封板**{amt_txt}。",
@@ -712,15 +695,14 @@ class ReportBuilder:
             f"  市场状态：{market.get('label')}（置信度 {market.get('confidence')}）",
             f"  市场宽度：MA20 {market.get('breadth_ma20')}% / MA60 {market.get('breadth_ma60')}%"
             f" | 涨停 {market.get('limit_up')} 家 | 炸板率 {market.get('broken_rate')}%",
-            f"  档位权重：短线 {market.get('weights', {}).get('short')}"
-            f" / 波段 {market.get('weights', {}).get('swing')}"
-            f" / 价值 {market.get('weights', {}).get('value')}",
             "-" * 68,
             f"  {ai.get('market_view') or ''}",
             "-" * 68,
         ]
         if recs is None or recs.empty:
-            lines.append("  今日无候选股票")
+            # 主链路删除后恒走这一支：候选名单只在报告「一、影子信号候选」与
+            # 页面操作台里呈现（系统已无主链路候选这一概念）。
+            lines.append("  候选名单见报告「一、影子信号候选」与页面操作台")
         else:
             for tier in TIER_ORDER:
                 sub = recs[recs["tier"] == tier].sort_values("tier_rank")

@@ -28,7 +28,7 @@ SYSTEM_PROMPT = """你是A股盘前研究助手，为个人投资者撰写当日
 {"market_view":"...","picks":[{"id":"...","logic":"...","risk":"..."}],"ops":"..."}
 
 各字段要写什么（按含义写，禁止照抄输入里的字段名）：
-- market_view：当前环境下**该进攻还是防守**的判断，并点出主推哪一档。50字内。
+- market_view：当前环境下**该进攻还是防守**的判断（市场状态只作背景，不涉及档位/策略选择）。50字内。
 - picks[].logic：这只股票**为什么入选**。引用输入 reasons 中的事实来说明，40字内。
 - picks[].risk：这只股票**最需要提防什么**。依据 reasons 里含风险/偏高/追高/波动/流动性
   的条目，以及 risk_penalty 的大小；若确实没有任何风险信息，写"未见明显风险"。40字内。
@@ -141,15 +141,15 @@ def build_review_prompt(stats: dict, detail: list[dict]) -> str:
 
 
 def template_market_view(market: dict) -> str:
-    """无 LLM 时的本地模板：保证报告结构完整。"""
+    """无 LLM 时的本地模板：保证报告结构完整。
+
+    2026-10-08：不再输出「主推 X 档」—— 档位配额随主链路删除，
+    市场状态只作背景描述（它不再影响任何选股）。
+    """
     label = market.get("label") or "未知"
-    w = market.get("weights") or {}
-    main = max(w, key=w.get) if w else "swing"
-    name = {"short": "短线", "swing": "波段", "value": "价值"}.get(main, "波段")
     return (
         f"{label}；宽度MA20 {market.get('breadth_ma20', '-')}%、MA60 {market.get('breadth_ma60', '-')}%；"
-        f"涨停 {market.get('limit_up', '-')} 家、炸板率 {market.get('broken_rate', '-')}%；"
-        f"主推{name}档。"
+        f"涨停 {market.get('limit_up', '-')} 家、炸板率 {market.get('broken_rate', '-')}%。"
     )
 
 

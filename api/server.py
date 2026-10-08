@@ -18,12 +18,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-from astock.config import get_config
+from astock.config import get_config, params_version
 from astock.logger import get_logger, setup_logging
-from astock.recommend.engine import params_version
-from astock.review.reviewer import Reviewer
 from astock.storage.serving import get_reader, serving_dir
-from astock.strategy import build_strategies
 
 cfg = get_config()
 setup_logging(cfg.log_dir)
@@ -107,16 +104,13 @@ def status() -> dict[str, Any]:
 
 @app.get("/api/config")
 def api_config() -> dict[str, Any]:
-    """前端需要的配置（不含任何密钥）。"""
-    strategies = build_strategies(cfg)
+    """前端需要的配置（不含任何密钥）。
+
+    2026-10-08：`strategies` 字段随策略层删除 —— 前端不再有"策略/档位"概念。
+    """
     return {
         "project": cfg.get("project.name"),
-        "tier_top_n": cfg.get("scoring.tier_top_n"),
         "new_stock_days": cfg.get("universe.new_stock_days"),
-        "strategies": {
-            tier: [{"name": s.name, "label": s.label} for s in items]
-            for tier, items in strategies.items()
-        },
         "llm_enabled": bool(cfg.get("llm.enabled", False)),
     }
 
@@ -203,65 +197,11 @@ def recommend_history(days: int = Query(30, ge=1, le=365)) -> dict[str, Any]:
     }
 
 
-# ---------------- 复盘 ----------------
-@app.get("/api/review/summary")
-def review_summary(days: int = Query(60, ge=1, le=1000)) -> dict[str, Any]:
-    _need_snapshot()
-    df = get_reader().query(
-        "SELECT * FROM review WHERE next_date >= (SELECT MAX(next_date) FROM review) "
-        f"- INTERVAL {int(days)} DAY",
-        "review",
-    )
-    return Reviewer.summary_from_frame(df)
-
-
-@app.get("/api/review/history")
-def review_history(days: int = Query(60, ge=1, le=1000)) -> dict[str, Any]:
-    _need_snapshot()
-    return {
-        "records": get_reader().records(
-            "SELECT * FROM review ORDER BY next_date DESC LIMIT ?", "review", [days]
-        )
-    }
-
-
-@app.post("/api/review/run")
-def review_run() -> dict[str, Any]:
-    """手动触发复盘回填。
-
-    **必须在子进程里执行，绝不在本服务进程内打开主库。**
-    本服务是长驻进程，一旦持有 DuckDB 连接就会把主库锁到进程退出为止，
-    直接后果是：用户只要开着网页，`daily` / `backfill` / `backtest` 全都会因
-    「文件被占用」而失败。子进程跑完即释放锁，本服务继续只读 Parquet 快照。
-    """
-    import subprocess
-    import sys
-
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "astock.cli", "review"],
-            cwd=str(cfg.project_root),
-            capture_output=True,
-            text=True,
-            timeout=900,
-        )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, "复盘执行超时（超过 15 分钟），请改用命令行查看进度。") from None
-
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
-        raise HTTPException(500, f"复盘执行失败：{detail[-600:] or '未知错误'}")
-
-    return {
-        "ok": True,
-        "message": "复盘完成，展示快照已更新，可刷新页面查看。",
-        "output": (proc.stdout or "").strip()[-2000:],
-    }
-
-
-# ---------------- 影子信号（v1.0 决策依据）----------------
-# 此前 serving 里完全没有这张表的数据 —— 页面上只能看到"观察池"（主链路），
-# 看不到真正要执行的名单。这三个端点补上这个缺口。
+# ---------------- 影子信号（唯一候选来源，处于纸面跟踪观察期）----------------
+# 2026-10-08：主链路的复盘端点（/api/review/*）随主链路一并删除 ——
+# 它们复盘的对象是 ads_recommend 里的 15 只候选，而那些策略经体检
+# 全部无可实现 alpha。影子自身的成绩回顾由 /api/shadow/history 直接给出
+# （结算在 ads_shadow_pick 内完成）。
 _ZT_CAP = {"30": 19.5, "68": 19.5}  # 创业板/科创板 20cm
 
 
@@ -691,68 +631,9 @@ def sector_top(
     }
 
 
-# ---------------- 策略 ----------------
-@app.get("/api/strategies")
-def strategies() -> dict[str, Any]:
-    _need_snapshot()
-    reader = get_reader()
-    rows = reader.records(
-        "SELECT * FROM strategy_stats ORDER BY data_date DESC, tier, strategy", "strategy_stats"
-    )
-    if not rows:
-        return {"available": False, "tiers": {}, "data_date": None, "pool_size": 0}
-
-    latest = max(r["data_date"] for r in rows)
-    rows = [r for r in rows if r["data_date"] == latest]
-
-    tiers: dict[str, list[dict[str, Any]]] = {"short": [], "swing": [], "value": []}
-    for r in rows:
-        tiers.setdefault(str(r["tier"]), []).append(
-            {"name": r["strategy"], "label": r["label"], "hits": r["hits"]}
-        )
-
-    pool_size = get_reader().scalar("SELECT COUNT(*) FROM feature_latest", "feature_latest", default=0)
-    return {
-        "available": True,
-        "data_date": latest,
-        "pool_size": int(pool_size or 0),
-        "tiers": tiers,
-    }
-
-
-# ---------------- Skill 库 ----------------
-@app.get("/api/skills")
-def skills_index() -> dict[str, Any]:
-    """策略 Skill 库索引。
-
-    直接读 `skills/registry.json`（文件），不查库 —— 与展示层快照同一思路，
-    因此采集/回测期间也能正常访问。
-    """
-    from astock.skills.store import SkillsStore
-
-    store = SkillsStore()
-    registry_path = store.root / "registry.json"
-    if not registry_path.exists():
-        return {"available": False, "skills": [], "hint": "运行 python -m astock.cli skills sync 生成"}
-
-    data = json.loads(registry_path.read_text(encoding="utf-8"))
-    return {"available": True, **data}
-
-
-@app.get("/api/skills/{name}")
-def skill_detail(name: str) -> dict[str, Any]:
-    from astock.skills.store import SkillsStore
-
-    skill = SkillsStore().get_skill(name)
-    if skill is None:
-        raise HTTPException(404, f"未找到策略：{name}")
-    return {
-        "name": name,
-        "skill_md": skill.get("skill_md", ""),
-        "meta": skill.get("meta", {}),
-        "performance": skill.get("performance", {}),
-        "references": list((skill.get("references") or {}).keys()),
-    }
+# ---------------- 策略 / Skill 库：已于 2026-10-08 随主链路删除 ----------------
+# /api/strategies（各策略命中数）与 /api/skills（策略档案）描述的都是那 8 个策略，
+# 它们在新版中已不存在，故三个端点全部移除。
 
 
 @app.get("/api/llm/usage")

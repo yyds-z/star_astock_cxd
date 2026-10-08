@@ -613,9 +613,8 @@ class Collector:
             "skipped_today": str(skipped_today) if skipped_today else None,
             "data_ready_time": self.calendar.data_ready_time().strftime("%H:%M"),
             "missing_days": len(self.calendar.missing_open_dates()),
-            "feature_rows": self.storage.table_count("dws_feature"),
+            # feature_rows / recommend_rows 已随主链路（因子宽表 + 观察池）删除
             "regime_rows": self.storage.table_count("dws_market_regime"),
-            "recommend_rows": self.storage.table_count("ads_recommend"),
             "review_rows": self.storage.table_count("ads_review"),
             "last_backfill_at": self.storage.get_state("collect", "backfill_finished_at"),
         }
