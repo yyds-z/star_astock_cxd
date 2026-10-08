@@ -410,6 +410,23 @@ def cmd_daily(args) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"提示：影子模块失败（它是唯一候选来源，必须排查）：{str(exc)[:200]}")
 
+    # ---- 5.5) 影子复盘（归因）：把「涨了/跌了」变成「为什么」 ----
+    # 必须排在报告之前：报告的「二、影子复盘」板块读的就是刚落库的这条记录。
+    # 归因只用于理解与记录，冻结期内不据此调参。
+    try:
+        from astock.shadow import ShadowReviewer
+
+        rev = ShadowReviewer(storage=storage).run(days=20, use_llm=use_llm)
+        if rev.get("available"):
+            print(
+                "影子复盘：%d 只 / %d 个信号日｜可实现超额 %s%%"
+                % (rev["picks"], rev["signal_days"], rev["excess"])
+            )
+        else:
+            print(f"影子复盘跳过：{rev.get('reason')}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"提示：影子复盘失败（报告复盘板块会缺内容）：{str(exc)[:160]}")
+
     # ---- 6) 报告 ----
     try:
         from astock.data.calendar import TradeCalendar

@@ -498,31 +498,35 @@ CREATE TABLE IF NOT EXISTS sys_strategy_stats (
     PRIMARY KEY (data_date, strategy)
 );
 
--- 样本外验证：历史逐日回放的推荐明细与远期收益
--- 收益口径：推荐日次日开盘买入，open 为基准
-CREATE TABLE IF NOT EXISTS ads_backtest (
-    run_id          VARCHAR,
-    data_date       DATE,      -- 信号日（用该日收盘及之前的数据选股）
-    trade_date      DATE,      -- 计划买入日（次一交易日）
-    market_state    VARCHAR,
-    tier            VARCHAR,
-    tier_rank       INTEGER,
-    code            VARCHAR,
-    name            VARCHAR,
-    strategy        VARCHAR,   -- 主策略（得分最高那条，用于按策略归因）
-    all_strategies  VARCHAR,   -- 全部命中的策略（拼接，用于展示）
-    hit_count       INTEGER,   -- 命中策略数量，用于验证多策略共振
-    final_score     DOUBLE,
-    strategy_score  DOUBLE,
-    factor_score    DOUBLE,
-    ret1            DOUBLE,    -- 买入日收盘收益(%)。⚠️ T+1 下不可实现（开盘买当天卖），仅诊断
-    ret_exit_d1o    DOUBLE,    -- 次日开盘卖(%，最早合法卖出) —— 裁判口径之一
-    ret_exit_d1c    DOUBLE,    -- 次日收盘卖(%，合法) —— **裁判口径**，headline 统计用它
-    ret3            DOUBLE,    -- 持有 3 个交易日(%)
-    ret5            DOUBLE,
-    ret10           DOUBLE,
-    max_gain        DOUBLE,    -- 10 日内最大涨幅(%)
-    max_dd          DOUBLE,    -- 10 日内最大回撤(%)
-    phase           VARCHAR,   -- observe(观察期) / validate(验证期)
-    PRIMARY KEY (run_id, data_date, tier, code)
+-- ---------- 应用层：影子信号复盘（归因）----------
+-- 2026-10-08 新增：主链路删除后，**复盘对象改为影子信号**。
+-- 一行 = 一次复盘（按复盘日主键），内容 = 可实现口径的聚合统计 + LLM 归因文字。
+--
+-- ⚠️ 判据一律是**可实现口径**（exec_*：信号日次日开盘买 → 再次日收盘卖）。
+--    旧口径 avg_ret1_old 只作对照 —— 它的收益 100% 来自当日已封板、收盘买不进的票，
+--    单列出来正是为了看得见"幻影收益"有多大（历史占候选 15.3%）。
+CREATE TABLE IF NOT EXISTS ads_shadow_review (
+    review_date    DATE PRIMARY KEY,   -- 复盘日（= 数据日）
+    window_from    DATE,               -- 覆盖的信号日区间
+    window_to      DATE,
+    signal_days    INTEGER,            -- 覆盖几个信号日
+    picks          INTEGER,            -- 样本数（已排除当日封板的不可买样本）
+    win_rate       DOUBLE,             -- 上涨占比(%)
+    avg_exec_d1    DOUBLE,             -- 可实现日均收益(%)  ← 唯一判据
+    avg_bench      DOUBLE,             -- 同池等权基准(%)
+    excess         DOUBLE,             -- 超额(%)
+    avg_ret1_old   DOUBLE,             -- 旧口径（仅对照）
+    hit_zt         INTEGER,            -- 命中涨停数
+    llm_used       BOOLEAN,            -- 归因是否来自 LLM（false = 本地模板）
+    verdict        VARCHAR,
+    wins           VARCHAR,
+    losses         VARCHAR,
+    lesson         VARCHAR,
+    adjust         VARCHAR,
+    detail         VARCHAR,            -- 涨跌各前 5 只（JSON）
+    created_at     TIMESTAMP
 );
+
+-- 已删除（2026-10-08）：ads_backtest —— 主链路（8 策略 → 评分 → 配额）的回测明细。
+-- 该链条经 250 个交易日、可实现口径的样本外体检**全部无 alpha**，已连代码一并删除。
+-- 影子的净值/校准改由 ads_shadow_pick 现算（api /api/equity、/api/calibration）。

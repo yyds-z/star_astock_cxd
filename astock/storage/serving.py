@@ -52,6 +52,10 @@ SNAPSHOT_QUERIES: dict[str, str] = {
     "shadow": """
         SELECT * FROM ads_shadow_pick ORDER BY date DESC, signal_score DESC
     """,
+    # 影子复盘（归因）：最近 60 次，操作台与复盘区共用
+    "shadow_review": """
+        SELECT * FROM ads_shadow_review ORDER BY review_date DESC LIMIT 60
+    """,
     # 盘中快照：只导最新一天（用于给影子候选标注"此刻能不能买"），体积可控
     "intraday": """
         SELECT * FROM dwd_intraday_snapshot

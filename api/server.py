@@ -401,13 +401,40 @@ def shadow_history(days: int = Query(60, ge=2, le=400)) -> dict[str, Any]:
     return {"records": rows, "aggregate": agg}
 
 
+@app.get("/api/shadow/review")
+def shadow_review(days: int = Query(60, ge=1, le=400)) -> dict[str, Any]:
+    """影子复盘（归因）：最近若干次复盘记录。
+
+    一行 = 一次复盘（按复盘日主键）：**可实现口径**的聚合统计 + LLM 归因文字。
+    旧口径 `avg_ret1_old` 一并返回，用途是让页面上能看见"买不进的幻影收益"有多大。
+    """
+    _need_snapshot()
+    rows = get_reader().records(
+        "SELECT * FROM shadow_review ORDER BY review_date DESC LIMIT ?",
+        "shadow_review",
+        [days],
+    )
+    if not rows:
+        return {"available": False, "records": [],
+                "hint": "尚无复盘：daily 会自动执行影子复盘（ShadowReviewer.run）"}
+    latest = dict(rows[0])
+    if latest.get("detail"):
+        try:
+            latest["detail"] = json.loads(latest["detail"])
+        except (TypeError, ValueError):
+            pass
+    return {"available": True, "latest": latest, "records": rows}
+
+
 # ---------------- 曲线（净值 / 校准）----------------
 @app.get("/api/equity")
 def equity(include_benchmark: bool = Query(True)) -> dict[str, Any]:
-    """三条净值曲线 + 绩效/显著性指标，**全部从 Parquet 快照计算**（不碰主库）。
+    """两条净值曲线（影子信号 + 同池等权基准）+ 绩效/显著性指标。
 
-    与回测报告用同一套口径与统计（复用 `astock.backtest.charts`），
-    否则"页面上的结论"和"报告里的结论"会不一致。
+    **全部从 Parquet 快照计算**（不碰主库），且与报告复用同一套口径与统计
+    （`astock.backtest.charts`），否则"页面上的结论"和"报告里的结论"会不一致。
+    口径一律是**可实现**的：信号日次日开盘买 → 再次日收盘卖，双边扣 0.3%。
+    主链路曲线已随主链路删除（2026-10-08）。
     """
     _need_snapshot()
     from astock.backtest import charts
@@ -416,13 +443,8 @@ def equity(include_benchmark: bool = Query(True)) -> dict[str, Any]:
     curves: list[charts.Curve] = []
     run_id = None
 
-    df = reader.query("SELECT d, r, run_id FROM backtest_daily ORDER BY d", "backtest_daily")
-    if not df.empty:
-        run_id = str(df["run_id"].iloc[0])
-        s = pd.Series((df["r"] / 100.0 - charts.COST_ROUND_TRIP).to_numpy(),
-                      index=df["d"].astype(str).tolist())
-        curves.append(charts.curve_from_series(
-            s, "主链路（观察池）", charts.C_MAIN, "次日开盘买→再次日收盘卖，扣0.3%"))
+    # 主链路曲线（ads_backtest）已随主链路删除。现在只有两个对象：
+    # 影子信号（唯一候选来源）与同池等权基准（诚实参照）。
 
     # 影子曲线同样按当前阈值过滤：否则图上画的是旧规则的净值，
     # 与页面顶部的"信号分 ≥ N"说明自相矛盾。

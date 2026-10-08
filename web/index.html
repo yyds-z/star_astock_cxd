@@ -114,6 +114,15 @@
     <div id="deskVerdict"></div>
   </div>
 
+  <!-- 影子复盘（归因）：把「涨了/跌了」变成「为什么」，供理解与校正 -->
+  <div class="panel" style="margin-bottom:16px;">
+    <h2>影子复盘（归因）
+      <span class="tag">可实现口径 · 仅供理解与记录</span>
+    </h2>
+    <div id="reviewSummary"></div>
+    <div id="reviewText"></div>
+  </div>
+
   <div class="grid2">
     <div class="panel">
       <h2>净值曲线　<span class="tag" id="eqRun">—</span></h2>
@@ -134,7 +143,7 @@
     <div class="chart-lg" id="chartMap" style="height:380px;"></div>
   </div>
 
-  <div class="sec">行情与观察池（主链路已降级：可实现口径超额 t=0.09，不再作为投资依据）</div>
+  <div class="sec">行情背景（市场状态已不参与选股，只作环境描述）</div>
 
   <div class="cards" id="cards"></div>
 
@@ -149,37 +158,11 @@
     </div>
   </div>
 
-  <div class="panel" style="margin-bottom:16px;">
-    <h2>候选股票</h2>
-    <div class="tabs" id="tierTabs"></div>
-    <div id="recDetail"></div>
-    <div id="recTable"><div class="empty">加载中…</div></div>
-  </div>
-
-  <div class="grid2">
-    <div class="panel">
-      <h2>复盘统计</h2>
-      <div id="reviewBox"><div class="empty">加载中…</div></div>
-    </div>
-    <div class="panel">
-      <h2>策略命中（最新数据日）</h2>
-      <div id="strategyBox"><div class="empty">加载中…</div></div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <h2>策略 Skill 库 <span class="muted" style="font-weight:400;font-size:12px;">
-      （每个策略独立档案 + 参数版本 + 历史成功率，点行看详情）</span></h2>
-    <div id="skillBox"><div class="empty">加载中…</div></div>
-    <div id="skillDetail"></div>
-  </div>
 </div>
 
 <script>
-const TIER_LABEL = {short:"短线", swing:"波段", value:"价值"};
-const TIER_ORDER = ["short","swing","value"];
-let currentRec = null;
-let activeTier = "swing";
+// TIER_LABEL / TIER_ORDER / currentRec / activeTier 已于 2026-10-08 移除：
+// 档位与"当前选中候选"这两个概念随主链路（8 策略 + 三档配额）删除。
 let charts = {};
 
 const fmt = (v,d=2)=> (v===null||v===undefined||isNaN(v)) ? "-" : Number(v).toFixed(d);
@@ -280,203 +263,42 @@ function drawLimit(rows){
   });
 }
 
-function renderTabs(recs){
-  const counts = {}; TIER_ORDER.forEach(t=>counts[t]=recs.filter(r=>r.tier===t).length);
-  document.getElementById("tierTabs").innerHTML = TIER_ORDER.map(t=>
-    `<div class="tab ${t===activeTier?"active":""}" onclick="switchTier('${t}')">
-       ${TIER_LABEL[t]}档 <span class="muted">(${counts[t]})</span></div>`
-  ).join("");
-}
-
-function switchTier(t){ activeTier = t; renderRecs(); }
-
-function renderRecs(){
-  if(!currentRec || !currentRec.records || !currentRec.records.length){
-    document.getElementById("recTable").innerHTML =
-      emptyHint("暂无推荐记录","python -m astock.cli daily");
-    document.getElementById("recDetail").innerHTML = "";
+// ---------------- 影子复盘（归因）----------------
+// 一行 = 一次复盘：可实现口径聚合 + LLM 归因文字。旧口径差额一并显示，
+// 让"买不进的幻影收益"看得见（差额来自当日封板、收盘买不进的票）。
+async function loadShadowReview(){
+  const d = await get("/api/shadow/review?days=60");
+  const sum = document.getElementById("reviewSummary");
+  const txt = document.getElementById("reviewText");
+  if(!d || !d.available){
+    sum.innerHTML = `<div class="empty">尚无复盘记录（daily 会自动执行影子复盘）</div>`;
+    txt.innerHTML = "";
     return;
   }
-  renderTabs(currentRec.records);
-  const rows = currentRec.records.filter(r=>r.tier===activeTier)
-                               .sort((a,b)=>a.tier_rank-b.tier_rank);
-  if(!rows.length){
-    document.getElementById("recTable").innerHTML =
-      `<div class="empty">该档今日无候选（市场状态可能已降低该档权重）</div>`;
-    return;
-  }
-  const head = `<tr><th>#</th><th>代码</th><th>名称</th><th>策略</th><th class="num">综合分</th>
-    <th class="num">收盘</th><th class="num">涨跌</th><th class="num">换手</th><th class="num">量比</th>
-    <th class="num">RPS120</th><th>次日结果</th></tr>`;
-  const body = rows.map(r=>{
-    const rv = r.review;
-    const resMap = {win:'<span class="up">涨</span>', loss:'<span class="down">跌</span>',
-                    flat:'<span class="muted">平</span>'};
-    const res = rv ? `${resMap[rv.result]||""} ${pct(rv.next_pct_chg)}` : '<span class="muted">待复盘</span>';
-    return `<tr onclick="showDetail('${r.rec_id}')">
-      <td>${r.tier_rank}</td><td>${r.code}</td><td>${r.name||"-"}</td>
-      <td>${r.strategy_label||"-"}</td>
-      <td class="num score">${fmt(r.final_score,1)}</td>
-      <td class="num">${fmt(r.close)}</td>
-      <td class="num ${cls(r.pct_chg)}">${pct(r.pct_chg)}</td>
-      <td class="num">${fmt(r.turn,2)}%</td>
-      <td class="num">${fmt(r.vol_ratio,2)}</td>
-      <td class="num">${fmt(r.rps120,1)}</td>
-      <td>${res}</td></tr>`;
-  }).join("");
-  document.getElementById("recTable").innerHTML =
-    `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
-  showDetail(rows[0].rec_id);
-}
-
-function showDetail(recId){
-  const r = (currentRec?.records||[]).find(x=>x.rec_id===recId);
-  if(!r){ document.getElementById("recDetail").innerHTML=""; return; }
-  const reasons = (r.reasons||[]).map(x=>`<li>${x}</li>`).join("");
-  const detail = r.score_detail||{};
-  const kv = Object.entries(detail).map(([k,v])=>`<span>${k} ${v}</span>`).join("");
-  document.getElementById("recDetail").innerHTML =
-    `<div class="detail">
-       <h3>${r.code} ${r.name||""}　<span class="score">综合分 ${fmt(r.final_score,1)}</span></h3>
-       <div class="muted">命中策略：${r.strategy_label||"-"}　|　市场状态：${r.market_label||"-"}　|　参数版本：${r.params_version||"-"}</div>
-       <ul>${reasons}</ul>
-       <div class="kv">${kv}</div>
-     </div>`;
-}
-
-async function loadRecommend(){
-  const data = await get("/api/recommend/latest");
-  if(!data || !data.available){
-    document.getElementById("recTable").innerHTML =
-      emptyHint("暂无推荐记录，请先运行每日流程","python -m astock.cli daily");
-    document.getElementById("tierTabs").innerHTML="";
-    document.getElementById("recDetail").innerHTML="";
-    return;
-  }
-  currentRec = data;
-  renderRecs();
-}
-
-async function loadReview(){
-  const s = await get("/api/review/summary?days=90");
-  const box = document.getElementById("reviewBox");
-  if(!s || !s.count){
-    box.innerHTML = emptyHint("暂无复盘样本（推荐后需等到次一交易日收盘）","python -m astock.cli review");
-    return;
-  }
-  const tierRows = Object.entries(s.by_tier||{}).map(([t,v])=>
-    `<tr><td>${TIER_LABEL[t]||t}</td><td class="num">${v.count}</td>
-     <td class="num">${fmt(v.win_rate,1)}%</td>
-     <td class="num ${cls(v.avg_return)}">${pct(v.avg_return)}</td></tr>`).join("");
-  const stratRows = Object.entries(s.by_strategy||{}).map(([n,v])=>
-    `<tr><td>${n}</td><td class="num">${v.count}</td>
-     <td class="num">${fmt(v.win_rate,1)}%</td>
-     <td class="num ${cls(v.avg_return)}">${pct(v.avg_return)}</td></tr>`).join("");
-  box.innerHTML = `
-    <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-bottom:12px;">
-      <div class="card"><div class="k">样本数</div><div class="v">${s.count}</div></div>
-      <div class="card"><div class="k">胜率</div><div class="v">${fmt(s.win_rate,1)}<small>%</small></div></div>
-      <div class="card"><div class="k">平均次日收益</div>
-        <div class="v ${cls(s.avg_return)}">${pct(s.avg_return)}</div></div>
-    </div>
-    <table><thead><tr><th>档位</th><th class="num">样本</th><th class="num">胜率</th><th class="num">平均收益</th></tr></thead>
-      <tbody>${tierRows}</tbody></table>
-    <h2 style="margin:14px 0 10px;">分策略</h2>
-    <table><thead><tr><th>策略</th><th class="num">样本</th><th class="num">胜率</th><th class="num">平均收益</th></tr></thead>
-      <tbody>${stratRows}</tbody></table>`;
-}
-
-const VERDICT = {
-  effective:{text:"有效", cls:"up"}, watching:{text:"观察", cls:"warn"},
-  ineffective:{text:"无效", cls:"down"}, insufficient:{text:"样本不足", cls:"muted"},
-  no_data:{text:"未回测", cls:"muted"},
-};
-
-async function loadSkills(){
-  const data = await get("/api/skills");
-  const box = document.getElementById("skillBox");
-  if(!data || !data.available){
-    box.innerHTML = emptyHint("Skill 库尚未生成","python -m astock.cli skills sync");
-    return;
-  }
-  const rows = (data.skills||[]).sort((a,b)=>
-    (TIER_ORDER.indexOf(a.tier)-TIER_ORDER.indexOf(b.tier)) || a.name.localeCompare(b.name));
-  const body = rows.map(s=>{
-    const v = VERDICT[s.verdict] || VERDICT.no_data;
-    return `<tr onclick="showSkill('${s.name}')">
-      <td><span class="badge">${TIER_LABEL[s.tier]||s.tier}</span></td>
-      <td>${s.label}</td>
-      <td class="muted">${s.name}</td>
-      <td>v${s.version||"-"}</td>
-      <td class="num">${s.sample_size ?? "-"}</td>
-      <td class="num">${s.win_rate ?? "-"}%</td>
-      <td class="num ${cls(s.avg_ret1)}">${s.avg_ret1==null?"-":pct(s.avg_ret1)}</td>
-      <td class="${v.cls}">${v.text}</td>
-    </tr>`;
-  }).join("");
-  box.innerHTML = `<div class="muted" style="margin-bottom:8px;font-size:12px;">
-      共 ${data.count} 个策略 · 生成于 ${data.generated_at||"-"}</div>
-    <table><thead><tr><th>档位</th><th>策略</th><th>标识</th><th>版本</th>
-      <th class="num">样本</th><th class="num">胜率</th><th class="num">T+1平均</th>
-      <th>判定</th></tr></thead><tbody>${body}</tbody></table>`;
-}
-
-async function showSkill(name){
-  const d = await get("/api/skills/"+encodeURIComponent(name));
-  const el = document.getElementById("skillDetail");
-  if(!d){ el.innerHTML=""; return; }
-  const meta = d.meta||{};
-  const perf = d.performance||{};
-  const bt = perf.backtest||{};
-  const quotes = (meta.conditions||[]).map(c=>`<li>${c}</li>`).join("");
-  const pitfalls = (meta.pitfalls||[]).map(p=>`<li>${p}</li>`).join("");
-  const stateRows = Object.entries(bt.by_market_state||{}).map(([k,v])=>
-    `<tr><td>${k}</td><td class="num">${v.count??"-"}</td>
-     <td class="num">${v.win_rate??"-"}%</td>
-     <td class="num ${cls(v.avg_ret1)}">${v.avg_ret1==null?"-":pct(v.avg_ret1)}</td></tr>`).join("");
-  el.innerHTML = `<div class="detail">
-    <h3>${meta.label||name} <span class="muted">(${name})</span>
-      　<span class="badge">v${meta.version||"-"}</span>
-      　<span class="badge">${meta.status||"-"}</span></h3>
-    <div class="muted">${meta.description||""}</div>
-    <div style="margin-top:10px;"><b>判定条件</b><ul>${quotes||"<li>-</li>"}</ul></div>
-    <div><b>已知失效场景</b><ul>${pitfalls||"<li>-</li>"}</ul></div>
-    ${stateRows?`<div style="margin-top:6px;"><b>分市场状态表现</b>
-      <table style="margin-top:6px;"><thead><tr><th>状态</th><th class="num">样本</th>
-      <th class="num">胜率</th><th class="num">T+1平均</th></tr></thead>
-      <tbody>${stateRows}</tbody></table></div>`:""}
-    <div class="kv" style="margin-top:10px;">
-      <span>文件：skills/${name}/SKILL.md</span>
-      <span>参数：${Object.entries(meta.params||{}).map(([k,v])=>k+"="+v).join(", ")||"-"}</span>
+  const r = d.latest || {};
+  const p = v => v==null ? "-" : ((v>0?"+":"") + Number(v).toFixed(3) + "%");
+  const diff = (r.avg_ret1_old!=null && r.avg_exec_d1!=null)
+    ? (Number(r.avg_ret1_old) - Number(r.avg_exec_d1)) : null;
+  sum.innerHTML = `<div class="cards">
+    <div class="card"><div class="k">复盘样本</div><div class="v">${r.picks ?? "-"}<small>只 / ${r.signal_days ?? "-"} 信号日</small></div></div>
+    <div class="card"><div class="k">上涨占比</div><div class="v">${r.win_rate ?? "-"}<small>%</small></div></div>
+    <div class="card"><div class="k">可实现日均</div><div class="v ${cls(r.avg_exec_d1)}">${p(r.avg_exec_d1)}</div></div>
+    <div class="card"><div class="k">同池基准</div><div class="v">${p(r.avg_bench)}</div></div>
+    <div class="card"><div class="k">超额</div><div class="v ${cls(r.excess)}">${p(r.excess)}</div></div>
+    <div class="card"><div class="k">命中涨停</div><div class="v">${r.hit_zt ?? "-"}<small>只</small></div></div>
+  </div>`;
+  const rows = [["结论", r.verdict], ["上涨共性", r.wins], ["下跌共性", r.losses],
+                ["观察", r.lesson], ["是否调整做法", r.adjust]]
+    .filter(x => x[1]).map(x => `<div style="margin-top:6px;"><b>${x[0]}</b>：${x[1]}</div>`).join("");
+  txt.innerHTML = `<div class="verdict">
+    <div class="muted" style="font-size:12px;">
+      窗口 ${r.window_from || "-"} ~ ${r.window_to || "-"}　归因来源：${r.llm_used ? "LLM" : "本地模板"}
+      ${diff != null ? `　｜ 旧口径对照 ${p(r.avg_ret1_old)}（差 ${diff.toFixed(3)}pp —— 差额来自当日封板、买不进的票，不可用）` : ""}
+    </div>${rows}
+    <div class="muted" style="margin-top:8px;font-size:12px;">
+      归因只用于<b>理解与记录</b>；契约冻结期内不据此调参（避免事后拟合）。
     </div>
   </div>`;
-}
-
-async function loadStrategies(){
-  const data = await get("/api/strategies");
-  const box = document.getElementById("strategyBox");
-  if(!data || !data.available){
-    box.innerHTML = emptyHint("暂无数据","python -m astock.cli factor");
-    return;
-  }
-  document.getElementById("poolBadge").textContent =
-    `股票池 ${data.pool_size} 只 · ${d10(data.data_date)}`;
-  const rows = [];
-  TIER_ORDER.forEach(t=>{
-    (data.tiers[t]||[]).forEach(s=>rows.push(
-      `<tr><td><span class="badge">${TIER_LABEL[t]}</span></td>
-       <td>${s.label}</td><td class="muted">${s.name}</td>
-       <td class="num">${s.hits}</td></tr>`));
-  });
-  box.innerHTML = `<table><thead><tr><th>档位</th><th>策略</th><th>标识</th>
-    <th class="num">命中</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
-}
-
-async function runReview(){
-  const r = await fetch("/api/review/run",{method:"POST"});
-  const d = await r.json().catch(()=>null);
-  alert(d ? `复盘完成：处理 ${d.pending} 条，成功 ${d.reviewed} 条，等待 ${d.waiting} 条` : "复盘失败");
-  loadAll();
 }
 
 /* ==================== 操作台（v1.0 决策依据） ==================== */
@@ -585,7 +407,7 @@ function renderShadow(d){
 }
 
 function setShadowFilter(k){ shadowFilter = k; renderShadow(shadowData); }
-function gotoStock(code){ alert("个股详情请在下方「候选股票」区块查看，或直接查代码 " + code); }
+function gotoStock(code){ alert("个股 " + code + "：查看该股日线可用 /api/stock/" + code); }
 
 function renderStopRules(h, mk, eq){
   const box = document.getElementById("deskVerdict");
@@ -764,8 +586,8 @@ async function loadSectorMap(){
 
 async function loadAll(){
   await Promise.all([
-    loadDesk(), loadEquity(), loadCalibration(), loadSectorMap(),
-    loadMarket(), loadRecommend(), loadReview(), loadStrategies(), loadSkills()
+    loadDesk(), loadShadowReview(), loadEquity(), loadCalibration(),
+    loadSectorMap(), loadMarket()
   ]);
 }
 

@@ -17,9 +17,11 @@ from astock.shadow.limit_gene import (
     shadow_min_signal_score,
     shadow_params_fingerprint,
 )
+from astock.shadow.review import ShadowReviewer
 
 __all__ = [
     "LimitGeneShadow",
+    "ShadowReviewer",
     "shadow_current_params",
     "shadow_min_amount_avg20",
     "shadow_min_signal_score",

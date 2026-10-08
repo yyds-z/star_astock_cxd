@@ -441,8 +441,11 @@ class ReportBuilder:
         # ---- 第一板块：影子信号（唯一候选来源）----
         lines.extend(self._render_shadow(result))
 
-        # ---- 第二板块：市场环境（只作背景，不参与决策）----
-        lines.append("## 二、市场环境")
+        # ---- 第二板块：影子复盘（归因）----
+        lines.extend(self._render_shadow_review())
+
+        # ---- 第三板块：市场环境（只作背景，不参与决策）----
+        lines.append("## 三、市场环境")
         lines.append("")
         lines.append(f"- 市场状态：**{market.get('label')}**（置信度 {market.get('confidence')}）")
         lines.append(f"- 市场宽度：MA20 上方 {market.get('breadth_ma20')}% / MA60 上方 {market.get('breadth_ma60')}%")
@@ -545,6 +548,58 @@ class ReportBuilder:
         lines.append("")
         lines.append("> 本报告由系统自动生成，仅供研究参考，不构成投资建议。")
         return "\n".join(lines)
+
+    # ---------------- 影子复盘板块 ----------------
+    def _render_shadow_review(self) -> list[str]:
+        """影子复盘（归因）板块。
+
+        只呈现**可实现口径**，并把旧口径差额一并写出来 ——
+        两者差额就是"买不进的那部分收益"，不写出来读者会以为旧数字也能拿到。
+        """
+        from astock.shadow.review import ShadowReviewer
+
+        lines: list[str] = ["## 二、影子复盘（归因）", ""]
+        try:
+            row = ShadowReviewer(storage=self.storage, llm=self.llm).latest()
+        except Exception as exc:  # noqa: BLE001 - 表未建等，报告不因此中断
+            row = None
+            logger.warning("影子复盘板块读取失败：%s", str(exc)[:120])
+        if not row:
+            lines.append("尚无复盘记录（daily 会自动执行影子复盘）。")
+            lines.append("")
+            return lines
+
+        exc_pct = row.get("excess")
+        lines.append(
+            f"- 样本：**{row.get('picks')}** 只 / {row.get('signal_days')} 个信号日"
+            f"（{row.get('window_from')} ~ {row.get('window_to')}）"
+        )
+        lines.append(
+            f"- **可实现口径**：上涨 {row.get('win_rate')}%｜日均 {row.get('avg_exec_d1')}%"
+            f"｜同池基准 {row.get('avg_bench')}%｜**超额 {exc_pct}%**"
+        )
+        old = row.get("avg_ret1_old")
+        new = row.get("avg_exec_d1")
+        if old is not None and new is not None:
+            lines.append(
+                f"- 旧口径对照：{old}%（差异 {round(float(old) - float(new), 3)}pp ——"
+                f" 差额来自当日已封板、收盘买不进的票，**不可用**）"
+            )
+        lines.append(
+            f"- 命中涨停：{row.get('hit_zt')} 只｜归因来源："
+            f"{'LLM' if row.get('llm_used') else '本地模板'}"
+        )
+        lines.append("")
+        for key, title in (("verdict", "结论"), ("wins", "上涨共性"),
+                           ("losses", "下跌共性"), ("lesson", "观察"),
+                           ("adjust", "是否调整做法")):
+            val = row.get(key)
+            if val:
+                lines.append(f"- **{title}**：{val}")
+        lines.append("")
+        lines.append("> 归因只用于**理解与记录**；契约冻结期内不据此调参（避免事后拟合）。")
+        lines.append("")
+        return lines
 
     # ---------------- 影子信号板块 ----------------
     def _render_shadow(self, result: dict) -> list[str]:
