@@ -105,7 +105,9 @@ def verify_backup(db_file: Path, expected: int | None) -> tuple[bool, str]:
         try:
             bars = con.execute("SELECT COUNT(*) FROM dwd_daily_bar").fetchone()[0]
             stocks = con.execute("SELECT COUNT(*) FROM dim_stock").fetchone()[0]
-            recs = con.execute("SELECT COUNT(*) FROM ads_recommend").fetchone()[0]
+            # 2026-10-08：原先统计的 ads_recommend 已随主链路删除，新建库里根本不存在，
+            # 会让这条校验**直接抛异常**（表现为"副本无法打开"）。改统计影子信号。
+            recs = con.execute("SELECT COUNT(*) FROM ads_shadow_pick").fetchone()[0]
         finally:
             con.close()
     except Exception as exc:  # noqa: BLE001

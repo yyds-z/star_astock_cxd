@@ -85,9 +85,14 @@ datasets:
 
   # ---------------- 派生层（可重建，无需单独验证有效性）----------------
   - table: dws_feature
-    name: 因子宽表
+    name: 因子宽表　**已删除（2026-10-08）**
     purpose: derived
-    status: core
+    status: removed
+    removed_note: >
+      随主链路删除，库中已 DROP（**254.5 万行**）。它是**纯派生数据**（由 dwd_daily_bar +
+      dim_stock 用窗口函数算出），无信息损失。原三个消费方已改为直接读日线且数值逐位一致：
+      市场状态 METRIC_SQL（宽度 ma20/ma60）、盘中快照的流通市值、涨停池补数通道。
+      原消费方「8 策略面板」随策略层一并删除。
     source: 由 dwd_daily_bar 库内计算
     cost: 全量约 1 分钟
     evidence: 策略的指标来源；口径与 Sequoia-X 对齐
@@ -204,9 +209,16 @@ datasets:
       若一年后样本翻倍仍不显著，应改 deprecated 并停止采集。
 
   - table: dws_finance_metrics
-    name: 财务报表与指标（多期）
+    name: 财务报表与指标（多期）　**已删除（2026-10-08）**
     purpose: pending
-    status: pending
+    status: removed
+    removed_note: >
+      随主链路删除，库中已 DROP（5.5 万行），同花顺财务采集方法（168 行）一并移除。
+      唯一消费方是价值档的基本面因子，而价值档所属的 8 策略经 250 日可实现口径体检
+      **全部无 alpha**。
+      ⚠️ 若将来重新采集，必须保留原实现的一条纪律：**用披露日（report_date）做 as-of 边界，
+      不能用报告期末** —— 否则回测会提前知道当时尚未公布的数字（前视偏差）。
+      原实现见 git f904528。
     source: 同花顺 Financial-API
     cost: 全市场回填约 17 小时（每只 3 次请求）
     evidence: >
@@ -304,6 +316,23 @@ datasets:
       ⚠️ 方向性陷阱：把「不破位」改成「回踩破位」（vs_ma5 < −0.02）后，次日涨停率
       掉到 3.58%、超额转为 −0.249%（t=−2.94，显著为负）。
       即缩量**整理**有效，缩量**回踩**无效 —— 不要改成回踩型。
+
+  - table: ads_shadow_review
+    name: 影子信号复盘（归因）
+    purpose: decision
+    status: core
+    add_date: 2026-10-08
+    note: >
+      **主链路删除后新增**：旧复盘（astock/review）的对象是 ads_recommend，
+      随主链路消失，故把复盘重建在影子信号上（astock/shadow/review.py）。
+      一行 = 一次复盘：可实现口径的聚合统计 + LLM 归因文字（verdict/wins/losses/
+      lesson/adjust）。
+      ⚠️ 判据一律是**可实现口径**（exec_d1 − exec_bench）。旧口径 avg_ret1_old
+      只作对照 —— 它的收益 100% 来自当日已封板、收盘买不进的票，单列出来正是为了
+      让人看见"幻影收益"有多大（历史占候选 15.3%）。
+      ⚠️ 冻结期护栏：归因只用于**理解与记录**，提示词要求 adjust 一律写"维持现状"，
+      不得据以调参（否则复盘会变成事后拟合的入口）。
+    verify: python -m astock.cli shadow status（或看每日报告的「二、影子复盘」板块）
 
   # ---------------- 已判定无用途 ----------------
   - table: （未采集）新闻/舆情
