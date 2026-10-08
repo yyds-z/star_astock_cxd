@@ -79,13 +79,7 @@ def test_row_keys_match_schema() -> None:
         "ticker": "600000", "name": "浦发银行", "open_times": 2, "last_price": 10.0,
         "price_change_ratio_pct": 3.2, "turnover_ratio_pct": 1.5, "turnover": 1.0e9,
     }
-    dragon_item = {
-        "ticker": "002407", "name": "多氟多", "range_days": 3, "net_value": 1.7e9,
-        "net_rate": 0.119, "buy_value": 2.6e9, "sell_value": 8.8e8, "amount": 5e9,
-        "hot_rank": 2, "org_net_value": 1e8, "org_net_rate": 0.01,
-        "org_buy_num": 2, "org_sell_num": 1, "hot_money_net_value": 5e7,
-        "limit_reason": "氢氟酸涨价",
-    }
+    # dragon_item 已随龙虎榜链路移除（2026-10-08，零消费者）
     # 财务三表：只需覆盖会被读到的字段
     income = [{
         "period_end_ms": ms(D), "report_date_ms": ms(date(2026, 8, 29)),
@@ -99,8 +93,8 @@ def test_row_keys_match_schema() -> None:
     cases = [
         ("dwd_limit_up", HithinkCollector._up_rows(D, [limit_item])),
         ("dwd_limit_break", HithinkCollector._break_rows(D, [break_item])),
-        ("dwd_dragon_tiger", HithinkCollector._dragon_rows(D, [dragon_item])),
         # dwd_auction 已随表移除（2026-09-30，该表 0 行），不再校验
+        # dwd_dragon_tiger 已随链路移除（2026-10-08，零消费者），不再校验
         ("dws_finance_metrics",
          HithinkCollector._finance_rows("600519", {"income": income,
                                                    "balance": balance,
@@ -131,10 +125,7 @@ def test_field_mapping() -> None:
     check("封单额取自 seal_money", row["seal_money"] == 1.4e8)
 
 
-def test_dragon_defaults() -> None:
-    """range_days 缺失时默认 1（当日榜），否则主键会落成 NULL。"""
-    row = HithinkCollector._dragon_rows(D, [{"ticker": "000001", "name": "平安银行"}])[0]
-    check("龙虎榜 range_days 缺省为 1", row["range_days"] == 1)
+# test_dragon_defaults 已随龙虎榜链路移除（2026-10-08，零消费者）
 
 
 # ---------------- 2. 前视偏差与单位 ----------------
@@ -243,7 +234,6 @@ def main() -> int:
     print("\n[1] 字段映射")
     test_row_keys_match_schema()
     test_field_mapping()
-    test_dragon_defaults()
     print("\n[2] 前视偏差与单位")
     test_report_date_stored()
     # test_auction_units 已随 dwd_auction 表移除（2026-09-30）

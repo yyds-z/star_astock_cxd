@@ -165,8 +165,17 @@ def summarise(df: pd.DataFrame, kou: str = "b", cost: float = EXEC_COST) -> dict
 
 
 def split_out_of_sample(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """按交易日对半拆：观察期（选参）/ 验证期（检验）。"""
-    days = sorted(df["date"].unique())
+    """按交易日对半拆：观察期（选参）/ 验证期（检验）。
+
+    空集/单日必须能安全返回：体检会跑到"整段历史只有 1 笔信号"的策略
+    （实测 new_stock_burst 250 日仅 1 笔），此时按索引取中点会
+    `IndexError: list index out of range` 直接把整次体检打断。
+    """
+    if df is None or df.empty:
+        return df, df
+    days = sorted(set(df["date"].unique()))
+    if len(days) < 2:
+        return df.iloc[0:0], df
     mid = days[len(days) // 2]
     return df[df["date"] < mid], df[df["date"] >= mid]
 

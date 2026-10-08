@@ -35,11 +35,7 @@ logger = get_logger("data.hithink")
 BASE_URL = "https://fuyao.aicubes.cn"
 PATH_LIMIT_UP = "/api/a-share/special-data/limit-up-pool"
 PATH_LIMIT_BREAK = "/api/a-share/special-data/limit-break-pool"
-# 龙虎榜：固定返回全量、**不分页**，因此每天只需 1 次请求（比涨停池还便宜）。
-# 显式传 date 时必须是交易日，传非交易日返回 code=1002（不会自动回退）。
-PATH_DRAGON_TIGER = "/api/a-share/special-data/dragon-tiger-list"
-# 集合竞价快照：单次最多 100 个 thscode，只用于「当日候选股」这种小批量场景。
-PATH_AUCTION = "/api/a-share/auction/snapshot"
+# PATH_DRAGON_TIGER / PATH_AUCTION 已随之移除（2026-10-08，均零消费者）。
 # 全市场行情快照（盘中实时价/量/额）。实测单次 **500 只可用**（1000 只失败），
 # 因此全市场约 11 次请求、40 余秒即可覆盖 —— 远优于竞价的 100 只上限。
 #
@@ -109,7 +105,10 @@ def _yoy(cur: Any, prev: Any) -> float | None:
 
 
 class HithinkCollector:
-    """涨停/炸板池、龙虎榜、集合竞价、财务报表采集器（限流安全）。"""
+    """涨停/炸板池、盘中行情快照、财务报表采集器（限流安全）。
+
+    龙虎榜与集合竞价两条链路已于 2026-10-08 移除（均无消费者）。
+    """
 
     PAGE_SIZE = 200          # 接口上限 200；涨停一天最多 200+ 只，通常 1 页
     DEFAULT_GAP = 4.2        # 15 次/分钟 => 间隔至少 4 秒
@@ -249,114 +248,13 @@ class HithinkCollector:
             )
         return rows
 
-    # ---------------- 龙虎榜 ----------------
-    @staticmethod
-    def _dragon_rows(d: date, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """龙虎榜行映射。
-
-        必须保留 range_days：同一只股票可能同时出现在「当日榜」和「3 日榜」，
-        这是**两条不同的记录**（榜单口径不同），用 (date, code, range_days) 才不会互相覆盖。
-        """
-        now = datetime.now()
-        rows = []
-        for it in items:
-            code = str(it.get("ticker") or "").strip()
-            if not code:
-                continue
-            rows.append(
-                {
-                    "date": d,
-                    "code": code,
-                    "name": it.get("name"),
-                    "range_days": it.get("range_days") or 1,
-                    "net_value": it.get("net_value"),
-                    "net_rate": it.get("net_rate"),
-                    "buy_value": it.get("buy_value"),
-                    "sell_value": it.get("sell_value"),
-                    "amount": it.get("amount"),
-                    "hot_rank": it.get("hot_rank"),
-                    "org_net_value": it.get("org_net_value"),
-                    "org_net_rate": it.get("org_net_rate"),
-                    "org_buy_num": it.get("org_buy_num"),
-                    "org_sell_num": it.get("org_sell_num"),
-                    "hot_money_net_value": it.get("hot_money_net_value"),
-                    "limit_reason": it.get("limit_reason"),
-                    "updated_at": now,
-                }
-            )
-        return rows
-
-    def collect_dragon_day(self, d: date) -> int:
-        """采集某天龙虎榜（1 次请求）。"""
-        data = self._get(PATH_DRAGON_TIGER, {"board_type": "all", "date": str(d)})
-        items = data.get("stock_items") or []
-        rows = self._dragon_rows(d, items)
-        if rows:
-            self.storage.upsert_df(pd.DataFrame(rows), "dwd_dragon_tiger")
-        logger.info("[%s] 龙虎榜 %d 条（上游 %d 条）", d, len(rows), len(items))
-        return len(rows)
-
-    def pending_dragon_dates(self, years: int | None = None, end: date | None = None) -> list[date]:
-        """尚未采集龙虎榜的交易日。"""
-        from astock.data.calendar import TradeCalendar
-
-        cal = TradeCalendar(self.storage)
-        end = end or date.today()
-        last = self.storage.query_value("SELECT MAX(date) FROM dwd_dragon_tiger")
-        if years is not None:
-            start = end - timedelta(days=int(365.25 * years))
-        elif last is not None:
-            start = last + timedelta(days=1)
-        else:
-            start = end - timedelta(days=int(365.25 * 1))
-        if start > end:
-            return []
-        return cal.open_dates(start, end)
-
-    def sync_dragon_tiger(
-        self,
-        dates: list[date] | None = None,
-        years: int | None = None,
-        progress_every: int = 20,
-    ) -> dict[str, Any]:
-        """采集龙虎榜（每天 1 次请求，限流下约 4.2 秒/天）。"""
-        from astock.data.calendar import TradeCalendar
-
-        cal = TradeCalendar(self.storage)
-        cal.sync()
-        if dates is None:
-            dates = self.pending_dragon_dates(years=years)
-        dates = sorted(set(dates))
-        if not dates:
-            logger.info("龙虎榜已是最新，无需采集")
-            return {"days": 0, "rows": 0, "failed": 0, "elapsed_sec": 0.0}
-
-        started = time.monotonic()
-        total = 0
-        failed = 0
-        for i, d in enumerate(dates, 1):
-            try:
-                total += self.collect_dragon_day(d)
-            except Exception as exc:  # noqa: BLE001
-                # 单日失败（如上游对该日无数据）不应中断整轮回填：
-                # 否则一个异常日期会让后面几百天全部采不到。
-                failed += 1
-                logger.warning("[%s] 龙虎榜采集失败，跳过：%s", d, str(exc)[:120])
-            if i % progress_every == 0 or i == len(dates):
-                rate = i / max(time.monotonic() - started, 1e-6)
-                remain = (len(dates) - i) / max(rate, 1e-6) / 60
-                logger.info(
-                    "龙虎榜采集进度 %d/%d（%s）| 预计剩余 %.1f 分钟",
-                    i, len(dates), d, remain,
-                )
-        return {
-            "days": len(dates) - failed,
-            "rows": total,
-            "failed": failed,
-            "elapsed_sec": round(time.monotonic() - started, 1),
-            "start": str(dates[0]),
-            "end": str(dates[-1]),
-        }
+    # ---------------- 龙虎榜：已于 2026-10-08 移除 ----------------
+    # 采集链路（_dragon_rows / collect_dragon_day / pending_dragon_dates /
+    # sync_dragon_tiger / cli dragon-tiger / run_dragon_backfill.bat）全部删除。
+    # 依据：**全代码库零消费者** —— 原消费方（dws_dragon_factor 等研究产物）已在
+    # 2026-09-30 清理时删除，此后它每天仍消耗 1 次 API 请求并写一张无人读的表。
+    # 历史数据保留在 `dwd_dragon_tiger`（19,401 行）：其中超过 1 年的部分上游已
+    # 不可回溯，删数据不可逆，故保留为归档、不再更新。
 
     # ---------------- 全市场日 K 补数 ----------------
     def fetch_dump_daily(self, days: int = 10) -> pd.DataFrame:
@@ -748,27 +646,11 @@ class HithinkCollector:
             logger.warning("行情快照因网络/服务异常放弃 %d 只（本次不重试，等下次采集）", failed)
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    def auction_snapshot(self, codes: list[str], stage: str = "final") -> list[dict[str, Any]]:
-        """批量拉取集合竞价快照（单次上限 100 只，自动分批）。
-
-        **为什么只有这一层**：落库链路（`dwd_auction` 表 + `_auction_rows` +
-        `collect_auction` + `auction` 命令）已于 2026-09-30 作为零使用数据移除
-        （该表自建库以来 0 行）。本方法作为**薄 API 包装**保留：将来若要做
-        「竞价类影子信号」（解冻后路线里点名的方向），只需重写落库与展示两段，
-        不必再对接接口。表定义见 git 历史中的 schema.sql。
-        """
-        uniq = [c for c in dict.fromkeys(codes) if c]
-        if not uniq:
-            return []
-        items: list[dict[str, Any]] = []
-        for i in range(0, len(uniq), 100):
-            batch = uniq[i : i + 100]
-            data = self._get(
-                PATH_AUCTION,
-                {"thscodes": ",".join(self._thscode(c) for c in batch), "stage": stage},
-            )
-            items.extend(data.get("item") or [])
-        return items
+    # ---------------- 集合竞价：已于 2026-10-08 移除 ----------------
+    # `auction_snapshot` 是"零调用者"的薄包装（其落库链路 dwd_auction 早在 9/30
+    # 就作为零使用数据删除）。若将来要做「竞价类影子信号」，恢复它只需一行
+    # `self._get(PATH_AUCTION, {"thscodes": ..., "stage": ...})` ——
+    # 留一段没人调用的代码，并不会让将来的实现更容易。
 
     def collect_day(self, d: date) -> dict[str, int]:
         """采集某一天（2 次请求）。返回各表写入行数。"""

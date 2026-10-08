@@ -79,6 +79,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_cu = sub.add_parser("checkup", help="策略体检：用可实现口径评估各策略并给出样本外判定")
     p_cu.add_argument("--days", type=int, default=250, help="回看交易日数（默认 250）")
     p_cu.add_argument("--only", type=str, default=None, help="只体检指定策略（逗号分隔）")
+    p_cu.add_argument("--refresh", action="store_true",
+                      help="忽略候选缓存，重新生成（默认复用缓存：生成要 7 分钟，打分只要几秒）")
 
     p_export = sub.add_parser("export", help="导出展示层快照（Web 端只读这份 Parquet）")
     p_export.add_argument("--bars-days", type=int, default=250, help="个股 K 线快照保留的交易日数")
@@ -94,10 +96,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_dump.add_argument("--days", type=int, default=10,
                         help="回看天数，默认 10（>10 会改用 10 年全量导出）")
-
-    p_dt = sub.add_parser("dragon-tiger", help="采集龙虎榜（同花顺源，每天 1 次请求）")
-    p_dt.add_argument("--date", type=str, default=None, help="只采集指定日期 YYYY-MM-DD")
-    p_dt.add_argument("--years", type=int, default=None, help="回填最近 N 年（首次建库用）")
 
     p_fin = sub.add_parser("finance", help="采集财务三表与指标（同花顺源，每只 3 次请求）")
     p_fin.add_argument("--codes", type=str, default=None, help="指定股票，逗号分隔")
@@ -353,13 +351,9 @@ def cmd_daily(args) -> int:
             "涨停池采集完成：%s（涨停 %d / 炸板 %d）"
             % (pool_date, pool_stats["limit_up"], pool_stats["limit_break"])
         )
-        # 龙虎榜（1 次请求）：当日榜单含游资/机构净买入，是短线资金面的核心补充。
-        # 单独 try，采不到不影响涨停池与后续选股。
-        try:
-            dt_rows = collector.collect_dragon_day(pool_date)
-            print("龙虎榜采集完成：%s（%d 条）" % (pool_date, dt_rows))
-        except Exception as exc:  # noqa: BLE001
-            print(f"提示：龙虎榜采集失败（不影响选股）：{str(exc)[:120]}")
+        # 龙虎榜采集已于 2026-10-08 移除：全代码库**零消费者**（原来的消费方
+        # dws_dragon_factor 等研究产物已在 9/30 清理时删除），它每天仍在消耗
+        # 1 次 API 请求并写入一张无人读的表。历史数据保留在库里（见台账）。
     except Exception as exc:  # noqa: BLE001
         print(f"提示：涨停池采集失败（不影响选股）：{str(exc)[:140]}")
 
@@ -631,44 +625,6 @@ def cmd_dump_daily(args) -> int:
     else:
         print(f"  无需补数（库内已是最新 {stats.get('latest_before')}）")
     print("=" * 76)
-    return 0
-
-
-def cmd_dragon_tiger(args) -> int:
-    """龙虎榜采集（同花顺源，每天 1 次请求）。"""
-    from astock.data.hithink import HithinkCollector
-
-    try:
-        collector = HithinkCollector()
-    except RuntimeError as exc:
-        print(f"[!] {exc}")
-        return 1
-
-    dates = None
-    if args.date:
-        import pandas as pd
-
-        dates = [pd.to_datetime(args.date).date()]
-
-    # 上游龙虎榜**只保留一年内数据**（超出范围返回 code=1003），
-    # 因此大于 1 的年份没有意义，直接夹紧而不是让它默默采一堆空数据。
-    years = args.years
-    if years and years > 1:
-        print(f"提示：龙虎榜上游仅保留最近一年数据，--years {years} 已按 1 年执行。")
-        years = 1
-    stats = collector.sync_dragon_tiger(dates=dates, years=years)
-
-    print()
-    print("=" * 72)
-    if stats["days"]:
-        print(f"  采集完成：{stats['days']} 个交易日（{stats['start']} ~ {stats['end']}）")
-        print(f"  龙虎榜记录 {stats['rows']} 条")
-        if stats["failed"]:
-            print(f"  ⚠ 有 {stats['failed']} 个交易日采集失败（已跳过，详见日志）")
-        print(f"  耗时 {stats['elapsed_sec']}s（速度受 15 次/分钟限流约束）")
-    else:
-        print("  无需采集（已是最新）")
-    print("=" * 72)
     return 0
 
 
@@ -1363,7 +1319,8 @@ def cmd_checkup(args) -> int:
     print(f"体检区间：{days[0]} ~ {days[-1]}（{len(days)} 个交易日）")
     print(f"策略数：{len(strategies)}　正在逐日生成候选（每日只加载一次截面）…")
     bench = pool_benchmark(storage)
-    all_hits = collect_hits(storage, strategies, days)
+    all_hits = collect_hits(storage, strategies, days,
+                            cache_dir="data/checkup", refresh=bool(args.refresh))
     results = []
     for s in strategies:
         hits = all_hits[s.name]
@@ -1437,7 +1394,6 @@ COMMANDS = {
     "export": cmd_export,
     "sector": cmd_sector,
     "limit-pool": cmd_limit_pool,
-    "dragon-tiger": cmd_dragon_tiger,
     "dump-daily": cmd_dump_daily,
     "attribution": cmd_attribution,
     "finance": cmd_finance,

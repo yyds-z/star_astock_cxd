@@ -72,11 +72,8 @@ RE_LP_PROGRESS = re.compile(
 )
 RE_LP_DONE = re.compile(RE_TS + r".*采集完成：(\d+) 个交易日（(\S+) ~ (\S+)）")
 
-# ---------------- 龙虎榜采集 ----------------
-RE_DT_DAY = re.compile(RE_TS + r".*\[(\d{4}-\d{2}-\d{2})\] 龙虎榜 (\d+) 条")
-RE_DT_PROGRESS = re.compile(
-    RE_TS + r".*龙虎榜采集进度 (\d+)/(\d+)（(\S+)）\| 预计剩余 ([\d.]+) 分钟"
-)
+# ---------------- 龙虎榜采集：已于 2026-10-08 移除（零消费者）----------------
+# 相关正则、解析与展示逻辑一并删除，避免监控台持续显示一个已停用的任务。
 
 # ---------------- 财务采集 ----------------
 RE_FIN_PROGRESS = re.compile(
@@ -96,11 +93,10 @@ TASK_LABEL = {
     "skills": "Skill 库同步",
     "index": "指数同步",
     "limit-pool": "涨停池采集（同花顺源）",
-    "dragon-tiger": "龙虎榜采集（同花顺源）",
-    "auction": "集合竞价采集（同花顺源）",
+    # dragon-tiger / auction 已移除（2026-10-08 龙虎榜零消费者；竞价链路 9/30 已删）
+    # ⚠️ 曾经这里 finance / attribution 各出现两次（重复键），Python 静默保留**最后一个**，
+    #    于是监控台把「财务三表回填」显示成「财务数据采集」—— 已去重。
     "finance": "财务三表回填（同花顺源，约 11.5 小时）",
-    "attribution": "复盘归因（LLM）",
-    "finance": "财务数据采集（同花顺源，每只 3 次请求）",
     "attribution": "复盘归因（LLM）",
     "sector": "行业映射采集",
     "sector-strength": "板块强度计算",
@@ -110,8 +106,7 @@ TASK_LABEL = {
 # 会抢占主库写锁的任务
 WRITE_TASKS = {
     "backfill", "backtest", "daily", "factor", "regime", "review", "index",
-    "limit-pool", "dragon-tiger", "auction", "finance", "attribution",
-    "sector", "sector-strength",
+    "limit-pool", "finance", "attribution", "sector", "sector-strength",
 }
 
 
@@ -393,30 +388,6 @@ def parse_limit_pool(lines: list[str]) -> dict:
     return info
 
 
-def parse_dragon_tiger(lines: list[str]) -> dict:
-    """解析龙虎榜采集进度（结构同涨停池，便于复用展示逻辑）。"""
-    info: dict = {
-        "done": 0,
-        "total": None,
-        "current_date": None,
-        "eta_min": None,
-        "rows": 0,
-        "finished": False,
-    }
-    for ln in lines:
-        m = RE_DT_DAY.search(ln)
-        if m:
-            info["current_date"] = m.group(2)
-            info["rows"] += int(m.group(3))
-            continue
-        m = RE_DT_PROGRESS.search(ln)
-        if m:
-            info["done"] = int(m.group(2))
-            info["total"] = int(m.group(3))
-            info["eta_min"] = float(m.group(5))
-    return info
-
-
 def parse_finance(lines: list[str]) -> dict:
     """解析财务采集进度（全市场回填约 17 小时，必须能看到进度）。"""
     info: dict = {"done": 0, "total": None, "current": None, "eta_min": None,
@@ -450,20 +421,6 @@ def _show_finance(info: dict, live: bool) -> None:
     if live and info["eta_min"] is not None:
         print(f"  预计剩余：约 {info['eta_min'] / 60:.1f} 小时"
               "（每只 3 次请求，速度固定，无法加快）")
-
-
-def _show_dragon_tiger(info: dict, live: bool) -> None:
-    if info["total"] is None and not info["current_date"]:
-        print("  未找到龙虎榜采集记录。")
-        return
-    done, total = info["done"], info["total"] or 0
-    print(f"  最新采集日：{info['current_date'] or '-'}　"
-          f"已完成 {done}/{total or '?'} 个交易日")
-    if total:
-        print(f"  进度：[{_bar(done, total)}] {done}/{total} ({done / total * 100:.0f}%)")
-    print(f"  已入库：{info['rows']} 条")
-    if live and info["eta_min"] is not None:
-        print(f"  预计剩余：约 {info['eta_min']:.1f} 分钟（每天 1 次请求，速度固定）")
 
 
 def _show_limit_pool(info: dict, live: bool) -> None:
@@ -606,13 +563,11 @@ def main() -> int:
         bt_lines = lines
     # 涨停池采集同样按最近一次运行起点截断
     lp_lines, _ = load_lines("执行命令：limit-pool")
-    dt_lines, _ = load_lines("执行命令：dragon-tiger")
     fin_lines, _ = load_lines("执行命令：finance")
 
     backfill = parse_backfill(lines)
     backtest = parse_backtest(bt_lines)
     limit_pool = parse_limit_pool(lp_lines)
-    dragon = parse_dragon_tiger(dt_lines)
     finance = parse_finance(fin_lines)
 
     procs, running, write_pids = detect_tasks()
@@ -662,8 +617,6 @@ def main() -> int:
         _show_backfill(backfill, live=("backfill" in running))
     elif active == "limit-pool" or forced == "limit-pool":
         _show_limit_pool(limit_pool, live=("limit-pool" in running))
-    elif active == "dragon-tiger" or forced == "dragon-tiger":
-        _show_dragon_tiger(dragon, live=("dragon-tiger" in running))
     elif active == "finance" or forced == "finance":
         _show_finance(finance, live=("finance" in running))
     else:
@@ -671,9 +624,6 @@ def main() -> int:
         print("  【最近一次记录】（非实时，仅供参考）")
         if limit_pool["total"] or limit_pool["finished"]:
             _show_limit_pool(limit_pool, live=False)
-        if dragon["total"]:
-            print()
-            _show_dragon_tiger(dragon, live=False)
         if backtest["started"]:
             print()
             _show_backtest(backtest, live=False)
@@ -721,12 +671,6 @@ def main() -> int:
                       "（限流 15 次/分钟，速度固定，无法加快）")
             else:
                 print("  ✔ 涨停池采集正在运行（刚启动，尚未产出第一个进度点）")
-        elif active == "dragon-tiger":
-            if dragon["eta_min"] is not None:
-                print(f"  ✔ 龙虎榜采集正在运行，预计还需约 {dragon['eta_min']:.0f} 分钟"
-                      "（限流 15 次/分钟，速度固定，无法加快）")
-            else:
-                print("  ✔ 龙虎榜采集正在运行（刚启动，尚未产出第一个进度点）")
         elif active == "finance":
             if finance["finished"]:
                 print("  ✔ 财务采集已完成（进程即将退出）")

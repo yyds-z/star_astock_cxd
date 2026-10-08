@@ -89,29 +89,54 @@ def _eval_one(strategy, panel: pd.DataFrame, d: date_cls) -> pd.DataFrame | None
 
 
 def collect_hits(storage, strategies: list[Any], days: list[date_cls],
+                 cache_dir: str | None = None, refresh: bool = False,
                  **panel_kw: Any) -> dict[str, pd.DataFrame]:
     """逐日加载**一次**截面，喂给全部策略 → {策略名: 命中表}。
 
     为什么要"每天只加载一次"：按策略分别加载会让同一天的截面被查 8 遍
     （实测 250 日 × 8 策略要多花 6 分钟），而生产流程本来就是
     "一天一个上下文、所有策略共享"（`StrategyContext` 的设计意图）。
+
+    缓存：生成 250 日 × 8 策略的候选要 ~7 分钟，而打分/判定是秒级的。
+    第 6 步的参数网格需要在同一批候选上反复评估，没有缓存则不可用。
+    缓存文件名带上区间戳，区间变化自动失效（不会拿旧区间结果冒充新区间）。
     """
-    frames: dict[str, list[pd.DataFrame]] = {s.name: [] for s in strategies}
+    stamp = f"{days[0]}_{days[-1]}_{len(days)}" if days else "empty"
+    cache: dict[str, Any] = {}
+    if cache_dir:
+        from pathlib import Path as _P
+
+        cd = _P(cache_dir)
+        cd.mkdir(parents=True, exist_ok=True)
+        for s in strategies:
+            fp = cd / f"hits_{s.name}_{stamp}.parquet"
+            if fp.exists() and not refresh:
+                cache[s.name] = pd.read_parquet(fp)
+        if len(cache) == len(strategies):
+            logger.info("体检候选命中缓存（%s，%d 个策略）", stamp, len(strategies))
+            return cache
+
+    todo = [s for s in strategies if s.name not in cache]
+    frames: dict[str, list[pd.DataFrame]] = {s.name: [] for s in todo}
     for i, d in enumerate(days, 1):
         panel = load_day_panel(storage, d, **panel_kw)
         if panel.empty:
             continue
-        for s in strategies:
+        for s in todo:
             got = _eval_one(s, panel, d)
             if got is not None:
                 frames[s.name].append(got)
         if i % 60 == 0:
             logger.info("体检进度 %d/%d（%s）", i, len(days), d)
     empty = pd.DataFrame(columns=["date", "code", "score"])
-    out: dict[str, pd.DataFrame] = {}
-    for s in strategies:
+    out: dict[str, pd.DataFrame] = dict(cache)
+    for s in todo:
         hits = pd.concat(frames[s.name], ignore_index=True) if frames[s.name] else empty
         out[s.name] = hits
+        if cache_dir:
+            from pathlib import Path as _P
+
+            hits.to_parquet(_P(cache_dir) / f"hits_{s.name}_{stamp}.parquet", index=False)
         logger.info("[%s] 命中 %d 笔 / %d 日", s.name, len(hits),
                     hits["date"].nunique() if not hits.empty else 0)
     return out
@@ -137,6 +162,10 @@ def score_strategy(hits: pd.DataFrame, bench: pd.DataFrame, label: str,
     out: dict[str, Any] = {"label": label, "picks": int(len(df))}
     for kou in ("a", "b"):
         exe = executable(df, kou)
+        if exe.empty or exe["date"].nunique() < 3:
+            # 该口径下没有可执行样本（例如全部候选次日都是一字板）
+            out[kou] = {"days": 0}
+            continue
         s = summarise(exe, kou)
         obs, val = split_out_of_sample(exe)
         s_obs, s_val = summarise(obs, kou), summarise(val, kou)
@@ -144,6 +173,10 @@ def score_strategy(hits: pd.DataFrame, bench: pd.DataFrame, label: str,
                     "obs_ex": s_obs.get("excess"), "val_ex": s_val.get("excess")}
 
     b = out["b"]
+    if not b.get("days"):
+        out["verdict"] = "无样本"
+        out["threshold"] = None
+        return out
     th = bonferroni_t(n_tests, b.get("days", 0))
     ok_stat = (b.get("val_t") is not None and b["val_t"] >= th
                and (b.get("val_ex") or 0) > 0)
