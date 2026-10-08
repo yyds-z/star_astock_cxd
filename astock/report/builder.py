@@ -177,7 +177,7 @@ class ReportBuilder:
         """生成报告。返回 {'markdown_path', 'json_path', 'markdown', ...}
 
         2026-10-08：**主链路删除后报告只剩影子板块 + 市场环境 + AI 解读**。
-        原「昨日推荐回顾」「候选股票（三档）」「基本面」三个板块随 ads_recommend
+        原「昨日推荐回顾」「影子候选（三档）」「基本面」三个板块随 ads_recommend
         一并移除 —— 它们描述的对象（8 个策略的候选）已不存在。
         影子自身的成绩回顾不在这里，而由 `ads_shadow_pick` 直接给出
         （页面顶部 KPI 与 `/api/shadow/history`）。
@@ -459,7 +459,7 @@ class ReportBuilder:
         lines.append("")
 
         if recs is None or recs.empty:
-            lines.append("今日无符合条件的候选股票。")
+            lines.append("今日无符合条件的影子候选。")
             return "\n".join(lines)
 
         # 基本面（价值档的核心输入）。只对候选股查询，且用**披露日**过滤。
