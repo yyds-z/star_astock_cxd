@@ -101,7 +101,10 @@ def collect_hits(storage, strategies: list[Any], days: list[date_cls],
     第 6 步的参数网格需要在同一批候选上反复评估，没有缓存则不可用。
     缓存文件名带上区间戳，区间变化自动失效（不会拿旧区间结果冒充新区间）。
     """
-    stamp = f"{days[0]}_{days[-1]}_{len(days)}" if days else "empty"
+    # ⚠️ 日期戳必须格式化：直接插值 date/datetime 会带上 " 00:00:00"，
+    # 而**冒号在 Windows 文件名里非法**，写缓存会以 `OSError: Invalid argument`
+    # 失败（实测把整次 7 分钟的体检连结果一起丢掉）。
+    stamp = (f"{days[0]:%Y%m%d}_{days[-1]:%Y%m%d}_{len(days)}" if days else "empty")
     cache: dict[str, Any] = {}
     if cache_dir:
         from pathlib import Path as _P
@@ -136,7 +139,12 @@ def collect_hits(storage, strategies: list[Any], days: list[date_cls],
         if cache_dir:
             from pathlib import Path as _P
 
-            hits.to_parquet(_P(cache_dir) / f"hits_{s.name}_{stamp}.parquet", index=False)
+            try:
+                hits.to_parquet(_P(cache_dir) / f"hits_{s.name}_{stamp}.parquet",
+                                index=False)
+            except Exception as exc:  # noqa: BLE001 - 缓存只是加速，不能因此丢掉结果
+                logger.warning("候选缓存写入失败（本次体检结果不受影响）：%s",
+                               str(exc)[:140])
         logger.info("[%s] 命中 %d 笔 / %d 日", s.name, len(hits),
                     hits["date"].nunique() if not hits.empty else 0)
     return out
