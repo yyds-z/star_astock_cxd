@@ -159,7 +159,7 @@ class Collector:
         备用数据源（akshare / adata）不提供退市日，会把 `out_date` 写成 NaT
         （akshare_source.py / adata_source.py 的列表实现里写死），
         而这里是 INSERT OR REPLACE —— **整行覆盖**。所以一旦改用备用源同步股票列表，
-        `dim_stock.out_date` 会被静默抹空；而 `Universe.filtered_codes` 正是靠
+        `dim_stock.out_date` 会被静默抹空；而 `Universe.all_codes` 与股票池过滤逻辑正是靠
         `out_date.isna() | (out_date > as_of)` 判断「当时是否已退市」。
 
         后果是**幸存者偏差的防护无声失效**：回测会把当时已退市（现实中归零）的

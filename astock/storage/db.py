@@ -87,10 +87,9 @@ class Storage:
     # 必须显式 ALTER，否则写入时报 "Table xxx does not have a column named yyy"。
     # 这里集中声明「代码期望但 schema.sql 无法自动补齐」的列。
     COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
-        "ads_recommend": {"primary_strategy": "VARCHAR"},
-        "ads_backtest": {"hit_count": "INTEGER", "all_strategies": "VARCHAR"},
-        # 财务报表必需披露日：缺它则无法避免前视偏差
-        "dws_finance_metrics": {"report_date": "DATE"},
+        # ads_recommend / ads_backtest / dws_finance_metrics 三条迁移已于
+        # 2026-10-08 随主链路删除 —— 留在表里会让**新建库**的 initdb 在
+        # ALTER 不存在的表时直接报错（迁移必须与建表脚本同步删）。
         # 记录涨停家数的来源口径，便于追溯历史状态判定
         "dws_market_regime": {"limit_up_source": "VARCHAR"},
         # 流动性下限（2026-09-30）：影子候选需要逐行携带「前 20 日均成交额」，
@@ -262,13 +261,6 @@ class Storage:
 
     def _backfill_migrated_columns(self, added: list[str]) -> None:
         """给新增列填充合理值，避免历史行留 NULL 导致后续统计落空。"""
-        if "ads_recommend.primary_strategy" in added:
-            # 历史推荐未记录主策略，用当时的拼接策略名兜底（同名单策略时即为正确值）
-            self.conn.execute(
-                "UPDATE ads_recommend SET primary_strategy = strategy "
-                "WHERE primary_strategy IS NULL"
-            )
-            logger.info("已回填 ads_recommend.primary_strategy 历史数据")
         if "ads_shadow_pick.amount_ma20" in added:
             # 一次性回填「前 20 个交易日均成交额」（不含当日）。
             #
