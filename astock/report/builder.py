@@ -579,36 +579,36 @@ class ReportBuilder:
         # 报告不自己实现口径。
         from astock.shadow import shadow_min_amount_avg20, shadow_min_signal_score
 
-        min_score = shadow_min_signal_score()
+        vol_max = 1.0 - shadow_min_signal_score() / 100.0
         min_amt = shadow_min_amount_avg20()
-        vol_max = 1.0 - min_score / 100.0
-        amt_txt = (f"，且前 20 日均成交额 ≥ {min_amt / 1e8:g} 亿" if min_amt > 0 else "")
+        amt_txt = (f"，前 20 日均成交额 ≥ {min_amt / 1e8:g} 亿" if min_amt > 0 else "")
         lines: list[str] = [
-            "## 二、影子信号候选（v1.0 决策依据）",
+            "## 二、影子信号候选（观察）",
             "",
-            f"> 逻辑：涨停基因（近 28 日有涨停、距上次 ≤10 天）+ 缩量（量 < 前 5 日均量 "
-            f"{vol_max:.0%}，即**信号分 ≥ {min_score:g}**，低于此分不推荐）"
-            f"+ 不破位（收 ≥ 前 5 日均价 98%）{amt_txt}。",
-            "> 检验结论（2026-09-30 修订后口径，观察期选参→验证期检验）："
-            "验证期日均超额 +1.226%、t=3.72、次日涨停率 17.6%（已含流动性下限）。",
-            "> 执行规则：**等权分散**（收益来自命中涨停的尾部，靠分散变正期望）、"
-            "市价买入不追板、持有 D+1/D+3 收盘。",
-            "> ⚠️ 修订代价：每日候选从 ~36 只降到 ~9 只，分散度下降，单只权重从 1/36 升到 1/9。",
-            "> ⚠️ 流动性下限用**前 20 个交易日**均额，不用当日额 —— 影子信号本身就是缩量，"
-            "当日额小是信号强度，不是流动性差。",
+            f"> 逻辑：涨停基因（近 28 日有涨停、距上次 ≤10 天）+ 缩量（量 < 前 5 日均量 {vol_max:.0%}）"
+            f"+ 不破位（收 ≥ 前 5 日均价 98%）+ **不买信号日已封板**{amt_txt}。",
+            "> 执行口径（**可实现**）：信号日次日**开盘**买入 → 再次日收盘卖出（T+1 下最早合法卖点）。",
+            "> ⚠️ **裁判结论（2026-10-08，可实现口径）：未通过检验。**"
+            "全接收等权日均超额 −0.016%（t=−0.12），样本外为 0"
+            "（观察期 −0.005% / 验证期 −0.027%）。名单仅供观察，不构成投资建议。",
+            "> ⚠️ 旧口径（信号日收盘买）曾显示 +0.650%（t=5.58）—— 那笔收益 100% 来自"
+            "**当日已封板、收盘买不进**的票（占候选 15.3%），该数字已作废。",
+            "> 执行规则：等权分散（收益来自约 1/4 命中涨停的尾部）、市价买入不追板。",
             "",
         ]
         data_date = str(result.get("data_date"))
         plan_date = str(result.get("plan_date") or "")
-        where = "date = ? AND signal_score >= ?"
-        wparams: list = [data_date, min_score]
+        # 按**可买性**过滤（封板买不进 + 流动性下限），不按参数指纹：
+        # 按指纹会让历史成绩随参数变动清零（见 api/server.py 同名说明）。
+        where = "date = ? AND (is_sealed IS NULL OR is_sealed = FALSE)"
+        wparams: list = [data_date]
         if min_amt > 0:
             where += " AND (amount_ma20 IS NULL OR amount_ma20 >= ?)"
             wparams.append(min_amt)
         try:
             picks = self.storage.query_df(
                 "SELECT code, name, close AS sig_close, zt20, days_since_zt, "
-                f"vol_ratio, signal_score, amount_ma20 FROM ads_shadow_pick "
+                f"vol_ratio, signal_score, amount_ma20, exec_d1 FROM ads_shadow_pick "
                 f"WHERE {where} ORDER BY signal_score DESC",
                 wparams,
             )
@@ -623,8 +623,8 @@ class ReportBuilder:
             dropped = 0
         if picks.empty:
             lines.append(
-                f"数据日 {data_date} 无影子候选（信号分 ≥ {min_score:g} 的标的一只都没有；"
-                f"另有 {dropped} 只因信号分不足被过滤）。"
+                f"数据日 {data_date} 无影子候选（缩量 < {vol_max:.0%} 且未封板的标的一只都没有；"
+                f"当日另有 {dropped} 只不满足条件）。"
             )
             lines.append("")
             return lines
@@ -667,7 +667,7 @@ class ReportBuilder:
             lines.append(
                 f"信号日 {data_date} 共 **{len(picks)}** 只候选（计划 {plan_date} 买入）。"
                 f"按计划日快照核对：可买 **{n_buy}** 只、已涨停 {n_zt} 只（放弃）。"
-                f"另有 {dropped} 只因信号分 < {min_score:g} 被过滤。"
+                f"当日另有 {dropped} 只不满足条件（缩量不足／已封板／流动性）。"
             )
             lines.append("")
             lines.append("| 代码 | 名称 | 信号分 | 信号日收盘 | 快照现价 | 快照涨幅 | 快照量比 | 信号量比 | 连板 | 距涨停(日) | 状态 |")
@@ -684,8 +684,8 @@ class ReportBuilder:
                 )
         else:
             lines.append(
-                f"信号日 {data_date} 共 **{len(picks)}** 只候选（计划 {plan_date} 买入，"
-                f"信号分 ≥ {min_score:g}；另有 {dropped} 只被过滤）。"
+                f"信号日 {data_date} 共 **{len(picks)}** 只候选（计划 {plan_date} 买入；"
+                f"当日另有 {dropped} 只不满足条件）。"
             )
             lines.append("")
             lines.append("| 代码 | 名称 | 信号分 | 信号日收盘 | 信号量比 | 连板 | 距上次涨停(日) |")

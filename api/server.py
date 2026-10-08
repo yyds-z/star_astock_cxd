@@ -284,17 +284,27 @@ def _shadow_min_amt() -> float:
     return shadow_min_amount_avg20()
 
 
-def _shadow_filters() -> tuple[str, list[float]]:
+def _shadow_filters() -> tuple[str, list[Any]]:
     """影子名单的准入条件 → (SQL 片段, 参数)。
 
     为什么要集中拼一次：有四个端点要过滤影子名单（最新候选、历史成绩、
     净值曲线、校准曲线），散着写就一定会漏 —— 而漏掉的那个会静默展示
     **引擎已不再产出**的候选，比不显示更糟。
+
+    两条过滤（都是**可买性条件**，可对历史回溯施加）：
+      ① `NOT is_sealed` —— 信号日已封板的票收盘买不进（占历史候选 15.3%），
+         其"收益"是幻影。这是 ex-post 过滤：封板与否在信号日收盘即已知，
+         对历史施加它**不引入未来信息**，也不是参数拟合。
+      ② 流动性下限。
+
+    ⚠️ 为什么不按 `params`（参数指纹）过滤：历史 9415 行是原始参数时期写入的，
+    按指纹过滤等于**每改一次参数就把历史成绩清零**（实测导致净值曲线与
+    历史成绩直接消失）。指纹的用途是审计与分段归因，不是展示过滤。
     """
     from astock.shadow import shadow_min_amount_avg20
 
-    sql = "signal_score >= ?"
-    params: list[float] = [_shadow_min_score()]
+    sql = "(is_sealed IS NULL OR is_sealed = FALSE)"
+    params: list[Any] = []
     amt = shadow_min_amount_avg20()
     if amt > 0:
         # amount_ma20 为 NULL 的行放行：无法判断时宁可展示也不静默隐藏。
@@ -330,7 +340,7 @@ def shadow_latest(offset: int = Query(0, ge=0, le=60)) -> dict[str, Any]:
         return {"available": False, "records": [], "hint": "尚无影子信号：需先跑 daily（含 shadow build）"}
 
     sig_date = str(dates[offset]["date"])[:10]
-    min_score = _shadow_min_score()
+    vol_max = 1.0 - _shadow_min_score() / 100.0
     where, where_params = _shadow_filters()
     rows = reader.records(
         "SELECT code, name, close AS sig_close, zt20, days_since_zt, vol_ratio, "
@@ -388,18 +398,18 @@ def shadow_latest(offset: int = Query(0, ge=0, le=60)) -> dict[str, Any]:
         "snapshot_slot": slots[0] if slots else None,
         "count": len(rows),
         "status_counts": counts,
-        "min_signal_score": round(min_score, 1),
+        "vol_ratio_max": round(vol_max, 2),
         "min_amount_avg20": round(_shadow_min_amt(), 0),
         "filtered_out": dropped,
         "total_on_date": total_on_date,
         "records": rows,
         "rules": [
-            f"信号分 < {min_score:g} 已过滤（缩量不够 = 抛压未枯竭）",
-            (f"前 20 日均成交额 < {_shadow_min_amt() / 1e8:g} 亿已过滤（买不进的票不算收益）"
+            f"缩量门槛：量 < 前 5 日均量 × {vol_max:g}（抛压枯竭）",
+            "**不买信号日已封板的票**（封板买不进；实测封板股次日高开低走）",
+            (f"前 20 日均成交额 ≥ {_shadow_min_amt() / 1e8:g} 亿（买不进的票不算收益）"
              if _shadow_min_amt() > 0 else "未设流动性下限"),
-            "等权分散（收益来自命中涨停的尾部，靠分散才成为正期望）",
-            "市价买入、不追板；已涨停的放弃",
-            "持有 D+1 / D+3 收盘，不因盘中波动提前割",
+            "执行口径：**次日开盘买入 → 再次日收盘卖出**（最早合法卖点，T+1）",
+            "等权分散；收益来自约 1/4 命中涨停的尾部，靠分散才成为正期望",
         ],
     }
 
@@ -418,10 +428,10 @@ def shadow_history(days: int = Query(60, ge=2, le=400)) -> dict[str, Any]:
         f"""
         SELECT CAST(date AS VARCHAR) AS date,
                COUNT(*) AS n,
-               COUNT(ret1) AS settled,
-               ROUND(AVG(ret1), 3) AS avg_ret1,
-               ROUND(AVG(ret3), 3) AS avg_ret3,
-               ROUND(AVG(excess), 3) AS avg_excess,
+               COUNT(exec_d1) AS settled,
+               ROUND(AVG(exec_d1), 3) AS avg_ret1,
+               ROUND(AVG(exec_d3), 3) AS avg_ret3,
+               ROUND(AVG(exec_d1 - exec_bench), 3) AS avg_excess,
                SUM(CASE WHEN hit_limit_up THEN 1 ELSE 0 END) AS hit_zt
         FROM shadow
         WHERE {where} AND date >= (SELECT MAX(date) FROM shadow) - INTERVAL {int(days)} DAY
@@ -476,18 +486,17 @@ def equity(include_benchmark: bool = Query(True)) -> dict[str, Any]:
 
     # 影子曲线同样按当前阈值过滤：否则图上画的是旧规则的净值，
     # 与页面顶部的"信号分 ≥ N"说明自相矛盾。
-    min_score = _shadow_min_score()
     where, where_params = _shadow_filters()
     df = reader.query(
-        "SELECT CAST(date AS VARCHAR) AS d, AVG(ret1) AS r FROM shadow "
-        f"WHERE ret1 IS NOT NULL AND {where} GROUP BY date ORDER BY date",
+        "SELECT CAST(date AS VARCHAR) AS d, AVG(exec_d1) AS r FROM shadow "
+        f"WHERE exec_d1 IS NOT NULL AND {where} GROUP BY date ORDER BY date",
         "shadow", where_params)
     if not df.empty:
         s = pd.Series((df["r"] / 100.0 - charts.COST_ROUND_TRIP).to_numpy(),
                       index=df["d"].astype(str).tolist())
         curves.append(charts.curve_from_series(
-            s, "影子信号（决策依据）", charts.C_SHADOW,
-            f"信号日收盘买→次日收盘卖，扣0.3%；已按信号分 ≥ {min_score:g} 过滤"))
+            s, "影子信号", charts.C_SHADOW,
+            "信号日次日开盘买→再次日收盘卖（可实现口径），扣0.3%"))
 
     if include_benchmark:
         # 基准 = 同池等权、与主链路同口径（用 stock_bars + dim_stock 两张快照算）。
@@ -585,8 +594,8 @@ def calibration(bins: int = Query(10, ge=3, le=20)) -> dict[str, Any]:
     )
     where, where_params = _shadow_filters()
     shadow = reader.query(
-        f"SELECT signal_score AS score, ret1 AS ret FROM shadow "
-        f"WHERE ret1 IS NOT NULL AND {where}",
+        f"SELECT signal_score AS score, exec_d1 AS ret FROM shadow "
+        f"WHERE exec_d1 IS NOT NULL AND {where}",
         "shadow", where_params)
     return {
         "groups": [

@@ -47,6 +47,30 @@ logger = get_logger("shadow.limit_gene")
 _LOOKBACK_CALENDAR_DAYS = 20
 
 
+def shadow_params_fingerprint() -> str:
+    """当前策略的**参数指纹**（`ads_shadow_pick.params` 列存的就是它）。
+
+    ⚠️ **必须只读配置、不碰数据库**：展示层（FastAPI）会调用它，而那个进程
+    绝不能打开主库 —— DuckDB 是独占文件锁，一旦 API 持有连接，18:30 的 daily
+    就会因"文件被占用"直接失败。实测踩过：让 API 调一个构造了
+    `LimitGeneShadow()`（含 storage）的函数，服务进程立刻锁住了主库。
+    """
+    s = get_config().section("shadow_gene")
+    amt = shadow_min_amount_avg20()
+    amt_txt = f"/amt20>={amt / 1e8:g}亿" if amt else ""
+    sealed = "/noSealed" if bool(s.get("exclude_sealed_today", True)) else ""
+    score = shadow_min_signal_score()
+    return (f"zt{int(s.get('zt_window_days', 28))}"
+            f"/recent{int(s.get('recent_days', 10))}"
+            f"/score>={score:g}(vol<={1.0 - score / 100.0:g}){amt_txt}{sealed}"
+            f"/ma5>={float(s.get('vs_ma5_min', -0.02))}")
+
+
+def shadow_current_params() -> str:
+    """（兼容保留）当前策略的参数指纹。"""
+    return shadow_params_fingerprint()
+
+
 def shadow_min_signal_score() -> float:
     """当前生效的「信号分下限」：低于它不推荐。
 
@@ -92,15 +116,21 @@ class LimitGeneShadow:
         self.vol_max = 1.0 - self.min_signal_score / 100.0
         # 流动性硬约束（见模块级函数）
         self.min_amount_avg20 = shadow_min_amount_avg20()
+        # 排除「信号日当天已封板」的候选：封板时收盘买不进（铁律 2）。
+        # 这是策略定义的一部分，不是可选优化 —— 实测口径 B（次日开盘买）下
+        # 排除后超额由 −0.016% 变为 +0.137%（t 由 −0.12 升到 1.23），
+        # 机制清楚：封板股次日普遍高开低走。
+        self.exclude_sealed = bool(s.get("exclude_sealed_today", True))
 
     @property
     def _params(self) -> str:
-        """参数指纹，逐行落库。**必须随阈值变化而变** —— 它是 G3 验收时
-        区分"修订前/修订后"样本的唯一依据（否则两段样本会混在一起统计）。"""
-        amt = f"/amt20>={self.min_amount_avg20 / 1e8:g}亿" if self.min_amount_avg20 else ""
-        return (f"zt{self.zt_window}/recent{self.recent_days}"
-                f"/score>={self.min_signal_score:g}(vol<={self.vol_max:g}){amt}"
-                f"/ma5>={self.ma5_min}")
+        """参数指纹，逐行落库。**必须随阈值变化而变** —— 它是审计与分段归因的
+        唯一依据（否则不同参数时期的样本会混在一起统计）。
+
+        委托给模块级函数，保证"落库的指纹"与"展示层算的指纹"**同源**：
+        两处各写一份 format 字符串迟早会分叉。
+        """
+        return shadow_params_fingerprint()
 
     # ---------------- 信号 ----------------
     def build(self, trade_date: date_cls | None = None, source: str = "daily") -> pd.DataFrame:
@@ -145,6 +175,8 @@ class LimitGeneShadow:
             # 前 20 个交易日均成交额：流动性下限的判据，**逐行落库**，
             # 让展示层/报告能按同一列过滤（不必各自重算，避免口径漂移）
             "amount_ma20": df["amount_ma20"].astype(float),
+            # 新行恒非封板（候选已排除封板）——显式写入，便于展示层统一过滤
+            "is_sealed": False,
             # 参考分：越缩量越高。仅用于展示排序，**不参与选股**
             # （截断只按 vol_ratio，避免引入未经检验的权重）
             "signal_score": (1.0 - df["vol_ratio"].astype(float)).clip(lower=0) * 100,
@@ -165,8 +197,13 @@ class LimitGeneShadow:
         而"持 3 日/5 日"恰恰是我们最关心的口径。
         重复结算同一行是安全的：收益由行情重算，值不变。
         """
+        # 判据含 exec_d1 IS NULL：历史行是在"可执行口径"列存在之前结算的，
+        # 若只判 ret1/ret5，它们的 exec_* 会**永久为空**（审计口径一旦缺列，
+        # 所有依赖它的统计都会静默漏掉这批样本）。
         pending = self.storage.query_df(
-            "SELECT date, code FROM ads_shadow_pick WHERE ret1 IS NULL OR ret5 IS NULL"
+            "SELECT date, code FROM ads_shadow_pick "
+            "WHERE ret1 IS NULL OR ret5 IS NULL OR exec_d1 IS NULL "
+            "   OR exec_bench IS NULL"
         )
         if pending.empty:
             return 0
@@ -180,8 +217,32 @@ class LimitGeneShadow:
         if merged.empty:
             return 0
 
-        # 基准：同期全池等权 D+1 收益（同一股票池、同口径）
-        bench = fwd.groupby("date", as_index=False).agg(benchmark=("ret1", "mean"))
+        # 基准：同期**可交易池**等权收益。两个口径各一套 —— 超额必须与自身口径
+        # 的基准相减，否则等于拿"收盘买"的策略去比"开盘买"的市场（口径错配）。
+        #
+        # ⚠️ 必须施加**股票池过滤**（与 eval/judge.py 的 POOL_SQL 一致）。
+        # 曾经这里直接对全量日线求均值，于是基准里混进了 ST、北交所、次新股，
+        # 与裁判模块的基准差出 0.68pp —— 基准口径不一致，超额就是错的。
+        bench = self.storage.query_df("""
+            SELECT f.date,
+                   AVG(f.ret1)     AS benchmark,
+                   AVG(f.exec_d1)  AS exec_bench
+            FROM (
+                SELECT code, date,
+                       (LEAD(close, 1) OVER w / NULLIF(close, 0) - 1) * 100 AS ret1,
+                       (LEAD(close, 2) OVER w / NULLIF(LEAD(open, 1) OVER w, 0) - 1) * 100
+                           AS exec_d1
+                FROM dwd_daily_bar
+                WHERE open > 0 AND close > 0 AND volume > 0
+                WINDOW w AS (PARTITION BY code ORDER BY date)
+            ) f
+            JOIN dim_stock s ON s.code = f.code
+            WHERE s.board IN ('main', 'gem')
+              AND COALESCE(s.is_st, FALSE) = FALSE
+              AND (s.out_date IS NULL OR s.out_date > f.date)
+              AND s.ipo_date <= f.date - INTERVAL 120 DAY
+            GROUP BY f.date
+        """)
         # 是否命中涨停：看该股在**下一个交易日**是否在涨停池里
         hit = self.storage.query_df("SELECT DISTINCT code, date FROM dwd_limit_up")
         hit = hit.rename(columns={"date": "next_date"})
@@ -200,12 +261,17 @@ class LimitGeneShadow:
             "hit_limit_up": merged["is_zt"].fillna(False).astype(bool),
             "benchmark": merged["benchmark"],
             "excess": merged["ret1"] - merged["benchmark"],
+            "exec_d1": merged["exec_d1"],
+            "exec_d3": merged["exec_d3"],
+            "exec_d5": merged["exec_d5"],
+            "exec_bench": merged["exec_bench"],
         })
         # 只更新结算列：先取回全行再合并，避免 upsert 整行覆盖丢掉信号字段
         full = self.storage.query_df("SELECT * FROM ads_shadow_pick")
         full = full.drop(columns=[c for c in
                                   ["next_date", "ret1", "ret3", "ret5",
-                                   "hit_limit_up", "benchmark", "excess"]
+                                   "hit_limit_up", "benchmark", "excess",
+                                   "exec_d1", "exec_d3", "exec_d5", "exec_bench"]
                                   if c in full.columns])
         out = full.merge(upd, on=["date", "code"], how="inner")
         n = self.storage.upsert_df(out, "ads_shadow_pick")
@@ -245,27 +311,41 @@ class LimitGeneShadow:
 
     # ---------------- 统计 ----------------
     def report(self, days: int = 60) -> str:
-        """影子运行摘要：命中率、可实现收益、超额与显著性。"""
+        """影子运行摘要：命中率、**可实现收益**、超额与显著性。
+
+        主口径 = 可实现口径（`exec_*`：次日开盘买 → 再次日收盘卖）。
+        旧的 `ret1/3/5`（信号日收盘买）只在末尾作为"诊断"列出 —— 它的收益
+        来自买不进的封板股，不能用来判断策略好坏。
+        """
+        # 必须按**日期**截窗口，不能用 `LIMIT days × max_picks`：
+        # max_picks=200 时它等于 12000 行，会把全部历史都算进来，
+        # 而输出却写着"近 N 日"（实测踩过：显示 243 日却自称 60 日）。
         df = self.storage.query_df(
-            f"SELECT * FROM ads_shadow_pick WHERE ret1 IS NOT NULL "
-            f"ORDER BY date DESC LIMIT {int(days) * self.max_picks}"
+            f"SELECT * FROM ads_shadow_pick WHERE exec_d1 IS NOT NULL "
+            f"AND date >= (SELECT MAX(date) FROM ads_shadow_pick) - INTERVAL {int(days)} DAY "
+            f"ORDER BY date DESC"
         )
         if df.empty:
             return "影子模块：暂无已结算样本。"
 
-        daily = df.groupby("date", as_index=False).agg(ex=("excess", "mean"))
+        daily = df.groupby("date", as_index=False).agg(
+            r=("exec_d1", "mean"), bench=("exec_bench", "mean"),
+            r3=("exec_d3", "mean"), r5=("exec_d5", "mean"))
+        daily["ex"] = daily["r"] - daily["bench"]
         t = 0.0
         if len(daily) > 2:
             sd = daily["ex"].std(ddof=1)
             t = float(daily["ex"].mean() / (sd / len(daily) ** 0.5)) if sd else 0.0
 
         lines = [
-            f"影子模块（涨停基因+缩量不破位）　参数 {self._params}",
-            f"  样本 {len(df)} 笔 / {df['date'].nunique()} 个交易日",
+            f"影子模块（涨停基因+缩量+不破位+不买封板）　参数 {self._params}",
+            f"  样本 {len(df)} 笔 / {df['date'].nunique()} 个交易日"
+            f"（近 {int(days)} 日窗口）",
             f"  次日涨停率 {100.0 * df['hit_limit_up'].fillna(False).mean():.2f}%"
-            f"（全市场约 2.05% → 提升 {100.0 * df['hit_limit_up'].fillna(False).mean() / 2.05:.1f} 倍）",
-            f"  可实现收益：次日 {df['ret1'].mean():+.3f}%　"
-            f"3日 {df['ret3'].mean():+.3f}%　5日 {df['ret5'].mean():+.3f}%",
+            f"（全市场约 2.05%）",
+            "  ── 可实现口径（次日开盘买 → 次日收盘卖，T+1 下最早合法）──",
+            f"  收益：1日 {daily['r'].mean():+.3f}%　"
+            f"3日 {daily['r3'].mean():+.3f}%　5日 {daily['r5'].mean():+.3f}%",
             f"  日均超额 {daily['ex'].mean():+.3f}%　t = {t:+.2f}"
             f"{'（显著）' if abs(t) >= 2 else '（不显著）'}",
         ]
@@ -274,9 +354,14 @@ class LimitGeneShadow:
         rest = df[~df["hit_limit_up"].fillna(False)]
         if not rest.empty:
             lines.append(
-                f"  ⚠ 收益来源：命中涨停 {len(tail)} 笔均值 {tail['ret1'].mean():+.2f}%，"
-                f"其余 {len(rest)} 笔均值 {rest['ret1'].mean():+.2f}%"
-                f"（剔除命中后超额 {rest['excess'].mean():+.3f}%）"
+                f"  ⚠ 收益来源：命中涨停 {len(tail)} 笔均值 {tail['exec_d1'].mean():+.2f}%，"
+                f"其余 {len(rest)} 笔均值 {rest['exec_d1'].mean():+.2f}%"
+            )
+        old = df["ret1"].dropna()
+        if not old.empty:
+            lines.append(
+                f"  （诊断·不可执行：旧口径『信号日收盘买』为 {old.mean():+.3f}%，"
+                f"该收益来自买不进的封板股，勿用于决策）"
             )
         return "\n".join(lines)
 
@@ -318,6 +403,10 @@ class LimitGeneShadow:
                    if self.min_amount_avg20 > 0 else ", NULL AS amount_ma20")
         amt_where = " AND COALESCE(r.amount_ma20, 0) >= ?" if self.min_amount_avg20 > 0 else ""
         amt_param = [self.min_amount_avg20] if self.min_amount_avg20 > 0 else []
+        # 铁律 2：信号日已封板 → 收盘买不进（`dwd_limit_up` 标记的是当日收盘涨停）
+        sealed_where = (" AND NOT EXISTS (SELECT 1 FROM dwd_limit_up z "
+                        "WHERE z.code = r.code AND z.date = r.date)"
+                        if self.exclude_sealed else "")
         sql = f"""
         WITH recent AS (
             SELECT code, date, close{amt_col},
@@ -343,7 +432,7 @@ class LimitGeneShadow:
           AND g.zt20 >= 1
           AND g.days_since_zt <= ?
           AND r.vol_ratio < ?
-          AND r.vs_ma5 >= ?{amt_where}
+          AND r.vs_ma5 >= ?{amt_where}{sealed_where}
         ORDER BY r.vol_ratio
         """
         params = [win_lower, target, *gene_params, target,
@@ -381,6 +470,9 @@ class LimitGeneShadow:
         )"""
             amt_join = " JOIN amt a ON a.code = k.code"
             amt_where = " AND COALESCE(a.amount_ma20, 0) >= ?"
+        sealed_where = (" AND NOT EXISTS (SELECT 1 FROM dwd_limit_up z "
+                        "WHERE z.code = k.code AND z.date = k.date)"
+                        if self.exclude_sealed else "")
         sql = f"""
         WITH ma AS (
             SELECT code, AVG(close) AS ma5, AVG(volume) AS avg_vol
@@ -406,7 +498,7 @@ class LimitGeneShadow:
           AND g.days_since_zt <= ?
           AND k.volume_ratio IS NOT NULL
           AND k.volume_ratio < ?
-          AND k.price / NULLIF(m.ma5, 0) - 1 >= ?{amt_where}
+          AND k.price / NULLIF(m.ma5, 0) - 1 >= ?{amt_where}{sealed_where}
         ORDER BY k.volume_ratio
         """
         if self.min_amount_avg20 > 0:
@@ -428,7 +520,13 @@ class LimitGeneShadow:
                    LEAD(b.close, 1) OVER w AS c1,
                    LEAD(b.close, 3) OVER w AS c3,
                    LEAD(b.close, 5) OVER w AS c5,
-                   LEAD(b.date, 1)  OVER w AS nd
+                   LEAD(b.date, 1)  OVER w AS nd,
+                   -- 可实现口径：买次日开盘，卖持有 N 日后的收盘
+                   -- （T+1：买入日=t+1，最早卖出=t+2 收盘 ⇒ N 从 1 起）
+                   LEAD(b.open, 1)  OVER w AS o1,
+                   LEAD(b.close, 2) OVER w AS c2,
+                   LEAD(b.close, 4) OVER w AS c4,
+                   LEAD(b.close, 6) OVER w AS c6
             FROM dwd_daily_bar b
             WHERE b.open > 0 AND b.close > 0 AND b.volume > 0
             WINDOW w AS (PARTITION BY b.code ORDER BY b.date)
@@ -436,6 +534,9 @@ class LimitGeneShadow:
         SELECT code, date, nd AS next_date, c1,
                (c1 / NULLIF(close, 0) - 1) * 100 AS ret1,
                (c3 / NULLIF(close, 0) - 1) * 100 AS ret3,
-               (c5 / NULLIF(close, 0) - 1) * 100 AS ret5
+               (c5 / NULLIF(close, 0) - 1) * 100 AS ret5,
+               (c2 / NULLIF(o1, 0) - 1) * 100 AS exec_d1,
+               (c4 / NULLIF(o1, 0) - 1) * 100 AS exec_d3,
+               (c6 / NULLIF(o1, 0) - 1) * 100 AS exec_d5
         FROM fwd
         """)

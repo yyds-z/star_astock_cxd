@@ -12,8 +12,16 @@ A 股 T+1 下不可实现，实测可实现口径下超额归零、D+5 显著为
 
 from astock.shadow.limit_gene import (
     LimitGeneShadow,
+    shadow_current_params,
     shadow_min_amount_avg20,
     shadow_min_signal_score,
+    shadow_params_fingerprint,
 )
 
-__all__ = ["LimitGeneShadow", "shadow_min_amount_avg20", "shadow_min_signal_score"]
+__all__ = [
+    "LimitGeneShadow",
+    "shadow_current_params",
+    "shadow_min_amount_avg20",
+    "shadow_min_signal_score",
+    "shadow_params_fingerprint",
+]

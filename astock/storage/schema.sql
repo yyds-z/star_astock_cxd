@@ -438,12 +438,26 @@ CREATE TABLE IF NOT EXISTS ads_shadow_pick (
     vol_ratio     DOUBLE,      -- 当日量 / 前 5 日均量（< 阈值 = 缩量）
     amount_ma20   DOUBLE,      -- 前 20 个交易日均成交额（流动性下限用；不含当日
                                -- 是为了让 18:30 日线路径与 14:00 快照路径口径一致）
+    is_sealed     BOOLEAN,     -- 信号日是否**已封板**（铁律 2：封板则收盘买不进）。
+                               -- 新行恒为 FALSE（候选已排除封板）；该列主要为**历史行**
+                               -- 而设：历史是在"排除封板"之前采的，需要按此列回溯过滤，
+                               -- 否则展示的成绩仍会包含买不进的票
     vs_ma5        DOUBLE,      -- 收盘 / 前 5 日均价 − 1（≥−0.02 = 不破位）
     signal_score  DOUBLE,      -- 按缩量程度排序的参考分（仅展示，不用于选股）
     next_date     DATE,        -- 下一交易日
-    ret1          DOUBLE,      -- 买入后 D+1 收盘(%)
-    ret3          DOUBLE,      -- D+3 收盘(%)
-    ret5          DOUBLE,      -- D+5 收盘(%)
+    -- ⚠️ 以下三列（ret1/ret3/ret5）口径为「信号日收盘买」——**仅作诊断保留**：
+    -- 信号日已封板的股票收盘买不进（实测占候选 15.3%，在分数≥50 档里高达 39.6%），
+    -- 该口径的"收益"几乎全部来自这些买不进的票。**不得用于任何决策或展示**。
+    ret1          DOUBLE,      -- [诊断·不可执行] 信号日收盘买 → 次日收盘卖(%)
+    ret3          DOUBLE,      -- [诊断·不可执行] 同上，持有 3 日(%)
+    ret5          DOUBLE,      -- [诊断·不可执行] 同上，持有 5 日(%)
+    -- ✅ 可实现口径（裁判口径，见 astock/eval/judge.py 铁律 1/2）：
+    --    买入 = 信号日次日**开盘**（一字板买不进，候选已排除）
+    --    卖出 = 买入后第 N 个交易日**收盘**
+    exec_d1       DOUBLE,      -- 可实现 D+1（最早合法卖点，**主口径**）
+    exec_d3       DOUBLE,      -- 可实现 D+3
+    exec_d5       DOUBLE,      -- 可实现 D+5
+    exec_bench    DOUBLE,      -- 同期同池等权、同口径基准(%)，用于算超额
     hit_limit_up  BOOLEAN,     -- D+1 是否涨停（收益来源，用于归因）
     benchmark     DOUBLE,      -- 同期全池等权 D+1 收益(%)
     excess        DOUBLE,      -- ret1 − benchmark

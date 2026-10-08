@@ -96,7 +96,19 @@ class Storage:
         # 流动性下限（2026-09-30）：影子候选需要逐行携带「前 20 日均成交额」，
         # 展示层与报告才能按同一阈值过滤（否则只能靠当日成交额近似 —— 而当日额
         # 在影子信号里代表缩量强度，不是流动性，两者会互相污染）。
-        "ads_shadow_pick": {"amount_ma20": "DOUBLE"},
+        "ads_shadow_pick": {
+            "amount_ma20": "DOUBLE",
+            # 可实现口径收益（2026-10-08 起）：原来的 ret1/3/5 是"信号日收盘买"，
+            # 而当日封板的候选收盘买不进（占 15.3%），其"收益"是幻影。
+            # 这四列由 shadow settle 回填（历史行需要补）。
+            "exec_d1": "DOUBLE",
+            "exec_d3": "DOUBLE",
+            "exec_d5": "DOUBLE",
+            "exec_bench": "DOUBLE",
+            # 历史候选含「信号日已封板」的票（占 15.3%），其"收益"是幻影。
+            # 新行恒为非封板，因此这一列只为历史行回填，供展示层回溯过滤。
+            "is_sealed": "BOOLEAN",
+        },
     }
 
     # 纯派生表：内容完全可由上游数据重算，没有任何不可再生的信息。
@@ -280,6 +292,26 @@ class Storage:
                 FROM w WHERE w.code = p.code AND w.date = p.date
             """)
             logger.info("已回填 ads_shadow_pick.amount_ma20 历史数据（前 20 个交易日均成交额）")
+        if "ads_shadow_pick.is_sealed" in added:
+            # 一次性标记历史行"信号日是否已封板"。判据 = 当日是否在涨停池里
+            # （`dwd_limit_up` 记的就是当日收盘涨停的票）。
+            #
+            # 为什么展示层需要这一列：历史候选是在"排除封板"这条规则之前采的，
+            # 其中 15.3% 当日封板 —— 那些票收盘买不进，收益是幻影。若不回溯过滤，
+            # 页面上仍会显示"业绩 4.6 倍"这种由买不进的票贡献的数字。
+            #
+            # 注意：这是 **ex-post 过滤**（可事后判定的可买性约束），不是参数拟合；
+            # 对历史施加它不会引入未来信息（封板与否在信号日收盘即已知）。
+            self.conn.execute("""
+                UPDATE ads_shadow_pick p SET is_sealed = TRUE
+                WHERE EXISTS (SELECT 1 FROM dwd_limit_up l
+                              WHERE l.code = p.code AND l.date = p.date)
+            """)
+            self.conn.execute(
+                "UPDATE ads_shadow_pick SET is_sealed = FALSE WHERE is_sealed IS NULL")
+            n = self.query_value(
+                "SELECT COUNT(*) FROM ads_shadow_pick WHERE is_sealed", default=0)
+            logger.info("已回填 ads_shadow_pick.is_sealed 历史数据（其中 %s 行当日封板）", n)
 
     # ---------------- 查询 ----------------
     def query_df(self, sql: str, params: Sequence[Any] | None = None) -> pd.DataFrame:
