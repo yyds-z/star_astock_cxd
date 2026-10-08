@@ -129,6 +129,14 @@ def test_field_mapping() -> None:
 # test_dragon_defaults 已随龙虎榜链路移除（2026-10-08，零消费者）
 
 
+# test_report_date_stored 已随财务采集功能移除（2026-10-08）。它测的其实是
+# `HithinkCollector._finance_rows` 把 report_date 存成**披露日**而非报告期末，
+# 用例对象（dws_finance_metrics / 财务解析器）已随主链路删除，故一并移除。
+# ⚠️ 但那条原理必须留住：**财务数据的"可知日"是披露日，不是报告期末**。
+#    用报告期末当 as-of 边界会让回测提前知道当时尚未公布的数字（前视偏差）。
+#    将来若重新采集财务数据，务必按披露日过滤（原实现见 git f904528）。
+
+
 # ---------------- 2. 前视偏差与单位 ----------------
 def main() -> int:
     print("=" * 72)
@@ -138,7 +146,10 @@ def main() -> int:
     test_row_keys_match_schema()
     test_field_mapping()
     print("\n[2] 前视偏差与单位")
-    # ⚠️ test_report_date_stored 在 2026-10-08 清理财务用例时被脚本**误删**
+    # test_report_date_stored 已移除（见文件末尾说明）
+    # 注：该用例曾于 2026-10-08 被清理脚本误删（连续叠加删除操作的后果），
+    #     已从 git 历史取回并恢复调用。
+    # 原说明：
     # （上一版按函数名删除后留下孤儿代码行，把该函数体并入了其它函数）。
     # 它校验的是「报告期 vs 披露日」的前视偏差——**该覆盖目前是缺失的**，
     # 需要时按 git 历史取回：git show <commit>:tests/test_hithink_parsers.py
