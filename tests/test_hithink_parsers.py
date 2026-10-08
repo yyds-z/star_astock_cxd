@@ -138,6 +138,26 @@ def test_field_mapping() -> None:
 
 
 # ---------------- 2. 前视偏差与单位 ----------------
+# ---------------- 6. 结构一致性 ----------------
+def test_migrations_match_schema() -> None:
+    """列迁移引用的表必须都在 schema.sql 里 —— 否则**新建库**会在 initdb 时报错。
+
+    真实事故（2026-10-08）：删除主链路时把 dws_feature / ads_recommend /
+    ads_backtest / dws_finance_metrics 从 schema.sql 拿掉了，但 db.py 的
+    COLUMN_MIGRATIONS 还留着它们。已有库因为表还在（归档）看不出问题，
+    而全新环境跑 initdb 会直接 ALTER 一张不存在的表并抛错 ——
+    这类"只在干净环境暴露"的缺陷，只能靠这种静态一致性检查守住。
+    """
+    import re as _re
+
+    from astock.storage.db import Storage
+
+    sql = SCHEMA_FILE.read_text(encoding="utf-8")
+    defined = set(_re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", sql))
+    bad = sorted(t for t in Storage.COLUMN_MIGRATIONS if t not in defined)
+    check("列迁移的表都在 schema.sql 中定义", not bad, f"多出：{bad}")
+
+
 def main() -> int:
     print("=" * 72)
     print("  数据解析回归测试（离线，不联网 / 不查库）")
@@ -145,6 +165,8 @@ def main() -> int:
     print("\n[1] 字段映射")
     test_row_keys_match_schema()
     test_field_mapping()
+    print("\n[6] 结构一致性")
+    test_migrations_match_schema()
     print("\n[2] 前视偏差与单位")
     # test_report_date_stored 已移除（见文件末尾说明）
     # 注：该用例曾于 2026-10-08 被清理脚本误删（连续叠加删除操作的后果），
