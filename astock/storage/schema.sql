@@ -281,9 +281,8 @@ CREATE TABLE IF NOT EXISTS dws_market_regime (
     state               VARCHAR,  -- trend/euphoria/recession/range/event
     state_label         VARCHAR,  -- 中文标签
     confidence          DOUBLE,
-    w_short             DOUBLE,
-    w_swing             DOUBLE,
-    w_value             DOUBLE,
+    -- w_short / w_swing / w_value 三档权重已于 2026-10-08 随主链路配额制移除。
+    -- 市场状态现在只用于**展示**（宽度/涨停家数/炸板率），不再影响任何选股。
     -- 涨停家数/炸板率的来源口径：selfcalc（自算，可覆盖全部历史）或 upstream（同花顺涨停池）。
     -- 存下来是为了**可追溯**：日后回看某天的状态判定时，能立刻知道用的哪个口径，
     -- 否则口径切换造成的历史断层将无法解释。

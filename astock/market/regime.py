@@ -30,18 +30,44 @@ STATE_LABEL = {
 }
 
 # 计算每日市场指标的 SQL（全部在库内向量化完成）
+#
+# 2026-10-08：**不再依赖因子宽表 dws_feature**（该表随主链路一并删除）。
+# dws_feature 本来就完全由 `dwd_daily_bar + dim_stock` 派生，所以这里直接读日线，
+# 并用**与原来逐字相同**的窗口定义现算 ma20/ma60：
+#   w20 = ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+#   w60 = ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
+# 这样 breadth_ma20/ma60 与删除前逐位一致（已实测比对）。涨停/跌停的判定表达式
+# 也与 FeatureBuilder 原来用的一致，故 up_count/limit_up_count 等同样不变。
 METRIC_SQL = """
 WITH f AS (
     SELECT
-        f.*,
-        CASE
-            WHEN COALESCE(d.is_st, FALSE) THEN 0.05
-            WHEN d.board IN ('gem', 'star') THEN 0.20
-            WHEN d.board = 'bj' THEN 0.30
-            ELSE 0.10
-        END AS lim_ratio
-    FROM dws_feature f
-    JOIN dim_stock d ON d.code = f.code
+        t.*,
+        CAST(close >= ROUND(preclose * (1 + lim_ratio), 2) - 0.001 AS BOOLEAN) AS is_limit_up,
+        CAST(close <= ROUND(preclose * (1 - lim_ratio), 2) + 0.001 AS BOOLEAN) AS is_limit_down
+    FROM (
+        SELECT
+            b.date,
+            b.code,
+            b.close,
+            b.preclose,
+            b.high,
+            b.amount,
+            b.pct_chg,
+            AVG(b.close) OVER (
+                PARTITION BY b.code ORDER BY b.date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+            ) AS ma20,
+            AVG(b.close) OVER (
+                PARTITION BY b.code ORDER BY b.date ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
+            ) AS ma60,
+            CASE
+                WHEN COALESCE(d.is_st, FALSE) THEN 0.05
+                WHEN d.board IN ('gem', 'star') THEN 0.20
+                WHEN d.board = 'bj' THEN 0.30
+                ELSE 0.10
+            END AS lim_ratio
+        FROM dwd_daily_bar b
+        JOIN dim_stock d ON d.code = b.code
+    ) t
 ),
 daily AS (
     SELECT
@@ -297,10 +323,8 @@ class MarketRegime:
             state = "range"
             confidence = 0.6
 
-        weights = self.cfg.get(f"market_regime.tier_weights.{state}", None) or self.cfg.get(
-            "market_regime.tier_weights.unknown", {"short": 0.3, "swing": 0.4, "value": 0.3}
-        )
-
+        # 2026-10-08：三档权重（short/swing/value）随主链路配额制一并移除。
+        # 市场状态现在**只用于展示**（市场宽度/涨停家数/炸板率），不再影响任何选股。
         return {
             "date": row["date"],
             "up_count": to_int(row.get("up_count")),
@@ -321,9 +345,6 @@ class MarketRegime:
             "state": state,
             "state_label": STATE_LABEL.get(state, state),
             "confidence": round(confidence, 3),
-            "w_short": to_float(weights.get("short"), 0.3),
-            "w_swing": to_float(weights.get("swing"), 0.4),
-            "w_value": to_float(weights.get("value"), 0.3),
             "detail": self._detail_text(recession_reasons, state, sector_name, sector_share),
         }
 
@@ -340,17 +361,6 @@ class MarketRegime:
         return self.storage.query_df(
             "SELECT * FROM dws_market_regime ORDER BY date DESC LIMIT ?", [days]
         ).sort_values("date")
-
-    def tier_weights(self, target: date | None = None) -> dict[str, float]:
-        """返回当前三档权重；无数据时回退到均衡权重。"""
-        row = self.latest() if target is None else self.get(target)
-        if not row:
-            return {"short": 0.3, "swing": 0.4, "value": 0.3}
-        return {
-            "short": to_float(row.get("w_short"), 0.3),
-            "swing": to_float(row.get("w_swing"), 0.4),
-            "value": to_float(row.get("w_value"), 0.3),
-        }
 
     def get(self, target: date) -> dict[str, Any] | None:
         """取指定交易日的市场状态。"""

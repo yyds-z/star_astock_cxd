@@ -269,14 +269,22 @@ class IntradaySnapshotCollector:
         return df.set_index("code")["avg_vol"]
 
     def _meta(self, trade_date: date_cls) -> pd.DataFrame:
-        """name（dim_stock）+ float_mv（最近一期 dws_feature）。"""
+        """name（dim_stock）+ float_mv（**由日线现算**）。
+
+        2026-10-08：不再读因子宽表 dws_feature（该表随主链路删除）。
+        流通市值 = 流通股本 × 收盘价，其中流通股本由换手率反推：
+            float_mv = close × (volume×100 / turn)
+        与 FeatureBuilder 原来用的公式**逐字相同**，故数值不变。
+        """
         prev = self.storage.query_value(
-            "SELECT MAX(date) FROM dws_feature WHERE date < ?", [trade_date]
+            "SELECT MAX(date) FROM dwd_daily_bar WHERE date < ?", [trade_date]
         )
         if prev is None:
             return self.storage.query_df("SELECT code, name, NULL AS float_mv FROM dim_stock")
         return self.storage.query_df(
-            "SELECT s.code, s.name, f.float_mv FROM dim_stock s "
-            "LEFT JOIN dws_feature f ON f.code = s.code AND f.date = ?",
+            "SELECT s.code, s.name, "
+            "       b.close * (b.volume * 100 / NULLIF(b.turn, 0)) AS float_mv "
+            "FROM dim_stock s "
+            "LEFT JOIN dwd_daily_bar b ON b.code = s.code AND b.date = ?",
             [prev],
         )

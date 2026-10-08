@@ -117,6 +117,9 @@ class Storage:
     # 而放过结构不一致会留下难以排查的诡异错误。
     RECREATABLE_TABLES: set[str] = {
         "dws_sector_strength",
+        # 2026-10-08：随主链路删除移除了 w_short/w_swing/w_value 三列。
+        # 全量重算只需一次 regime 计算（494 行、秒级），故直接重建比 ALTER 干净。
+        "dws_market_regime",
     }
 
     def init_schema(self) -> None:

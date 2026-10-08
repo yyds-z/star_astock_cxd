@@ -320,16 +320,19 @@ class HithinkCollector:
             )
             prev_close = {str(r["code"]): float(r["close"]) for _, r in pdf.iterrows()}
 
-        # 流通股本（用于近似换手率），取库内最新一期
+        # 流通股本（用于近似换手率）：股本 = volume×100 / turn
+        # 2026-10-08 改为直接由日线推导（不再依赖已删除的因子宽表 dws_feature）。
+        # 等价性：原来用 float_mv÷close，而 float_mv = close×(volume×100/turn)，
+        # 约去 close 后与下式完全相同。
         shares: dict[str, float] = {}
         try:
             fdf = self.storage.query_df(
-                "SELECT code, close, float_mv FROM dws_feature WHERE date = ?", [latest]
+                "SELECT code, volume, turn FROM dwd_daily_bar WHERE date = ?", [latest]
             )
             for _, r in fdf.iterrows():
-                fm, cl = r["float_mv"], r["close"]
-                if fm is not None and cl and not pd.isna(fm) and float(cl) > 0:
-                    shares[str(r["code"])] = float(fm) / float(cl)
+                vol, tr = r["volume"], r["turn"]
+                if vol and tr and not pd.isna(vol) and not pd.isna(tr) and float(tr) > 0:
+                    shares[str(r["code"])] = float(vol) * 100 / float(tr)
         except Exception as exc:  # noqa: BLE001
             logger.warning("流通股本反推失败，本次换手率留空：%s", str(exc)[:100])
 
