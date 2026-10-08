@@ -64,6 +64,17 @@ def shadow_min_signal_score() -> float:
     return (1.0 - float(s.get("vol_ratio_max", 0.7))) * 100.0
 
 
+def shadow_min_amount_avg20() -> float:
+    """流动性硬约束：前 20 个交易日均成交额下限（0 = 不启用）。
+
+    与 `shadow_min_signal_score` 同理 —— **配置的唯一读取点**：引擎、报告、
+    网页接口都调它，而不是各自读配置或各自写一个数。
+    展示层必须按同一阈值过滤，否则页面上会出现引擎已不再产出的"幽灵候选"。
+    """
+    s = get_config().section("shadow_gene")
+    return float(s.get("min_amount_avg20", 0) or 0)
+
+
 class LimitGeneShadow:
     """涨停基因影子模块。"""
 
@@ -79,13 +90,16 @@ class LimitGeneShadow:
         # 缩量门槛：以「信号分下限」为准，**反推** vol_ratio_max（见模块级函数）。
         self.min_signal_score = shadow_min_signal_score()
         self.vol_max = 1.0 - self.min_signal_score / 100.0
+        # 流动性硬约束（见模块级函数）
+        self.min_amount_avg20 = shadow_min_amount_avg20()
 
     @property
     def _params(self) -> str:
         """参数指纹，逐行落库。**必须随阈值变化而变** —— 它是 G3 验收时
         区分"修订前/修订后"样本的唯一依据（否则两段样本会混在一起统计）。"""
+        amt = f"/amt20>={self.min_amount_avg20 / 1e8:g}亿" if self.min_amount_avg20 else ""
         return (f"zt{self.zt_window}/recent{self.recent_days}"
-                f"/score>={self.min_signal_score:g}(vol<={self.vol_max:g})"
+                f"/score>={self.min_signal_score:g}(vol<={self.vol_max:g}){amt}"
                 f"/ma5>={self.ma5_min}")
 
     # ---------------- 信号 ----------------
@@ -128,6 +142,9 @@ class LimitGeneShadow:
             "days_since_zt": df["days_since_zt"].astype(int),
             "vol_ratio": df["vol_ratio"].astype(float),
             "vs_ma5": df["vs_ma5"].astype(float),
+            # 前 20 个交易日均成交额：流动性下限的判据，**逐行落库**，
+            # 让展示层/报告能按同一列过滤（不必各自重算，避免口径漂移）
+            "amount_ma20": df["amount_ma20"].astype(float),
             # 参考分：越缩量越高。仅用于展示排序，**不参与选股**
             # （截断只按 vol_ratio，避免引入未经检验的权重）
             "signal_score": (1.0 - df["vol_ratio"].astype(float)).clip(lower=0) * 100,
@@ -292,18 +309,28 @@ class LimitGeneShadow:
         lower = target - timedelta(days=self.zt_window)
         gene_sql, gene_params = self._gene_cte(target, lower)
         win_lower = target - timedelta(days=60)
+        # 流动性：前 20 个交易日（不含当日）的日均成交额。
+        # 不含当日的原因见 settings.yaml shadow_gene.min_amount_avg20 的注释 ——
+        # 简言之：14:00 快照路径拿不到当日全日成交额，两条路径必须同口径。
+        amt_col = ", amount" if self.min_amount_avg20 > 0 else ""
+        amt_win = (""", AVG(amount) OVER (PARTITION BY code ORDER BY date
+                       ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING) AS amount_ma20"""
+                   if self.min_amount_avg20 > 0 else ", NULL AS amount_ma20")
+        amt_where = " AND COALESCE(r.amount_ma20, 0) >= ?" if self.min_amount_avg20 > 0 else ""
+        amt_param = [self.min_amount_avg20] if self.min_amount_avg20 > 0 else []
         sql = f"""
         WITH recent AS (
-            SELECT code, date, close,
+            SELECT code, date, close{amt_col},
                    volume / NULLIF(AVG(volume) OVER (PARTITION BY code ORDER BY date
                        ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING), 0) AS vol_ratio,
                    close / NULLIF(AVG(close) OVER (PARTITION BY code ORDER BY date
                        ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING), 0) - 1 AS vs_ma5
+                   {amt_win}
             FROM dwd_daily_bar
             WHERE open > 0 AND close > 0 AND volume > 0 AND date >= ? AND date <= ?
         ),
         {gene_sql}
-        SELECT r.code, s.name, r.close, r.vol_ratio, r.vs_ma5,
+        SELECT r.code, s.name, r.close, r.vol_ratio, r.vs_ma5, r.amount_ma20,
                g.zt20, g.days_since_zt
         FROM recent r
         JOIN gene g ON g.code = r.code
@@ -316,11 +343,11 @@ class LimitGeneShadow:
           AND g.zt20 >= 1
           AND g.days_since_zt <= ?
           AND r.vol_ratio < ?
-          AND r.vs_ma5 >= ?
+          AND r.vs_ma5 >= ?{amt_where}
         ORDER BY r.vol_ratio
         """
         params = [win_lower, target, *gene_params, target,
-                  self.recent_days, self.vol_max, self.ma5_min]
+                  self.recent_days, self.vol_max, self.ma5_min, *amt_param]
         return self.storage.query_df(sql, params)
 
     def _query_snapshot(self, target: date_cls) -> pd.DataFrame:
@@ -337,6 +364,23 @@ class LimitGeneShadow:
             logger.warning("历史不足 5 个交易日，无法计算均线（snapshot 模式）")
             return pd.DataFrame()
         marks = ", ".join("?" for _ in days)
+        # 流动性 CTE：与日线路径**同一指标**（前 20 个交易日日均成交额，不含当日）。
+        # 这里用 ROW_NUMBER 取最近 20 行再平均 —— 因为快照路径没有"当日"这一行
+        # （当日只有半天数据），语义上正好就是"前 20 个已完成交易日"。
+        amt_cte = amt_join = amt_where = ""
+        amt_param: list = []
+        if self.min_amount_avg20 > 0:
+            amt_cte = f""",
+        amt AS (
+            SELECT code, AVG(amount) AS amount_ma20 FROM (
+                SELECT code, amount,
+                       ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn
+                FROM dwd_daily_bar
+                WHERE date < ? AND date >= ? AND amount > 0
+            ) t WHERE rn <= 20 GROUP BY code
+        )"""
+            amt_join = " JOIN amt a ON a.code = k.code"
+            amt_where = " AND COALESCE(a.amount_ma20, 0) >= ?"
         sql = f"""
         WITH ma AS (
             SELECT code, AVG(close) AS ma5, AVG(volume) AS avg_vol
@@ -344,13 +388,14 @@ class LimitGeneShadow:
             WHERE date IN ({marks}) AND close > 0 AND volume > 0
             GROUP BY code
         ),
-        {gene_sql}
+        {gene_sql}{amt_cte}
         SELECT k.code, s.name, k.price AS close, k.volume_ratio AS vol_ratio,
                k.price / NULLIF(m.ma5, 0) - 1 AS vs_ma5,
+               {'a.amount_ma20' if amt_cte else 'NULL'} AS amount_ma20,
                g.zt20, g.days_since_zt
         FROM dwd_intraday_snapshot k
         JOIN ma m ON m.code = k.code
-        JOIN gene g ON g.code = k.code
+        JOIN gene g ON g.code = k.code{amt_join}
         JOIN dim_stock s ON s.code = k.code
         WHERE k.date = ?
           AND s.board IN ('main', 'gem')
@@ -361,11 +406,18 @@ class LimitGeneShadow:
           AND g.days_since_zt <= ?
           AND k.volume_ratio IS NOT NULL
           AND k.volume_ratio < ?
-          AND k.price / NULLIF(m.ma5, 0) - 1 >= ?
+          AND k.price / NULLIF(m.ma5, 0) - 1 >= ?{amt_where}
         ORDER BY k.volume_ratio
         """
-        params = [*days, *gene_params, target,
-                  self.recent_days, self.vol_max, self.ma5_min]
+        if self.min_amount_avg20 > 0:
+            amt_param = [target, target - timedelta(days=60)]
+        # 参数顺序必须与 SQL 中 ? 出现的顺序**严格一致**。SQL 里的出现次序是：
+        #   ① ma CTE 的 date IN (marks…) ② gene CTE (target, lower)
+        #   ③ amt CTE (date < target, date >= target-60) ④ 各阈值
+        # 所以 amt 必须排在 gene **之后**（amt_cte 在 SQL 文本里跟在 gene_sql 后面）。
+        params = [*days, *gene_params, *amt_param, target,
+                  self.recent_days, self.vol_max, self.ma5_min,
+                  *([self.min_amount_avg20] if amt_where else [])]
         return self.storage.query_df(sql, params)
 
     def _forward_returns(self) -> pd.DataFrame:

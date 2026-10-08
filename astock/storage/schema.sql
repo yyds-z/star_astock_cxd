@@ -435,7 +435,9 @@ CREATE TABLE IF NOT EXISTS ads_shadow_pick (
     close         DOUBLE,      -- 信号日收盘（买入价基准）
     zt20          INTEGER,     -- 过去 28 个自然日内涨停次数
     days_since_zt INTEGER,     -- 距上次涨停天数
-    vol_ratio     DOUBLE,      -- 当日量 / 前 5 日均量（<0.7 = 缩量）
+    vol_ratio     DOUBLE,      -- 当日量 / 前 5 日均量（< 阈值 = 缩量）
+    amount_ma20   DOUBLE,      -- 前 20 个交易日均成交额（流动性下限用；不含当日
+                               -- 是为了让 18:30 日线路径与 14:00 快照路径口径一致）
     vs_ma5        DOUBLE,      -- 收盘 / 前 5 日均价 − 1（≥−0.02 = 不破位）
     signal_score  DOUBLE,      -- 按缩量程度排序的参考分（仅展示，不用于选股）
     next_date     DATE,        -- 下一交易日

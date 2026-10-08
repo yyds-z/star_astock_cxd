@@ -575,36 +575,49 @@ class ReportBuilder:
         每只候选会标注**此刻实况与可执行性**——这是「14:00 决策」的落地形式；
         18:30 生成报告时快照通常尚不存在，则只呈现信号本身。
         """
-        # 信号分下限（低于它不推荐）：与引擎**同一个读取点**，报告不自己实现口径。
-        from astock.shadow import shadow_min_signal_score
+        # 准入条件（信号分下限 + 流动性下限）：与引擎**同一个读取点**，
+        # 报告不自己实现口径。
+        from astock.shadow import shadow_min_amount_avg20, shadow_min_signal_score
 
         min_score = shadow_min_signal_score()
+        min_amt = shadow_min_amount_avg20()
         vol_max = 1.0 - min_score / 100.0
+        amt_txt = (f"，且前 20 日均成交额 ≥ {min_amt / 1e8:g} 亿" if min_amt > 0 else "")
         lines: list[str] = [
             "## 二、影子信号候选（v1.0 决策依据）",
             "",
             f"> 逻辑：涨停基因（近 28 日有涨停、距上次 ≤10 天）+ 缩量（量 < 前 5 日均量 "
             f"{vol_max:.0%}，即**信号分 ≥ {min_score:g}**，低于此分不推荐）"
-            "+ 不破位（收 ≥ 前 5 日均价 98%）。",
+            f"+ 不破位（收 ≥ 前 5 日均价 98%）{amt_txt}。",
             "> 检验结论（2026-09-30 修订后口径，观察期选参→验证期检验）："
-            "验证期日均超额 +1.258%、t=3.88、次日涨停率 23.6%。",
-            "> 执行规则：**等权分散**（收益来自约 1/4 命中涨停的尾部，靠分散变正期望）、"
+            "验证期日均超额 +1.226%、t=3.72、次日涨停率 17.6%（已含流动性下限）。",
+            "> 执行规则：**等权分散**（收益来自命中涨停的尾部，靠分散变正期望）、"
             "市价买入不追板、持有 D+1/D+3 收盘。",
             "> ⚠️ 修订代价：每日候选从 ~36 只降到 ~9 只，分散度下降，单只权重从 1/36 升到 1/9。",
+            "> ⚠️ 流动性下限用**前 20 个交易日**均额，不用当日额 —— 影子信号本身就是缩量，"
+            "当日额小是信号强度，不是流动性差。",
             "",
         ]
         data_date = str(result.get("data_date"))
         plan_date = str(result.get("plan_date") or "")
+        where = "date = ? AND signal_score >= ?"
+        wparams: list = [data_date, min_score]
+        if min_amt > 0:
+            where += " AND (amount_ma20 IS NULL OR amount_ma20 >= ?)"
+            wparams.append(min_amt)
         try:
             picks = self.storage.query_df(
                 "SELECT code, name, close AS sig_close, zt20, days_since_zt, "
-                "vol_ratio, signal_score FROM ads_shadow_pick "
-                "WHERE date = ? AND signal_score >= ? ORDER BY signal_score DESC",
-                [data_date, min_score],
+                f"vol_ratio, signal_score, amount_ma20 FROM ads_shadow_pick "
+                f"WHERE {where} ORDER BY signal_score DESC",
+                wparams,
             )
-            dropped = int(self.storage.query_value(
-                "SELECT COUNT(*) FROM ads_shadow_pick WHERE date = ? AND signal_score < ?",
-                [data_date, min_score], default=0) or 0)
+            total_on_date = int(self.storage.query_value(
+                "SELECT COUNT(*) FROM ads_shadow_pick WHERE date = ?",
+                [data_date], default=0) or 0)
+            found = int(self.storage.query_value(
+                f"SELECT COUNT(*) FROM ads_shadow_pick WHERE {where}", wparams, default=0) or 0)
+            dropped = max(0, total_on_date - found)
         except Exception:  # noqa: BLE001 - 表不存在等，报告不因影子失败而中断
             picks = pd.DataFrame()
             dropped = 0

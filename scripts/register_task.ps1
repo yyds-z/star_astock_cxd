@@ -107,11 +107,17 @@ catch {
 Write-Host ''
 Write-Host ('-' * 68)
 Write-Host '  当前状态：'
-foreach ($n in @($DailyName, $BackupName)) {
+# 必须把 3 个任务**全部**回显（含 Snapshot）。
+# 早先这里只列了 Daily / Backup，于是"Snapshot 没注册成功"在回显里看不出来 ——
+# 实测因此漏跑了 8 个交易日的盘中快照（G2 目标一直停在 1/60）。
+foreach ($n in @($SnapshotName, $DailyName, $BackupName)) {
     $info = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
     if ($null -ne $info) {
         $state = $info.State
         Write-Host ('    ' + $n.PadRight(20) + $state)
+    }
+    else {
+        Write-Host ('    ' + $n.PadRight(20) + '✖ 未注册（异常，请检查权限）')
     }
 }
 

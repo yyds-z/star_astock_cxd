@@ -93,6 +93,10 @@ class Storage:
         "dws_finance_metrics": {"report_date": "DATE"},
         # 记录涨停家数的来源口径，便于追溯历史状态判定
         "dws_market_regime": {"limit_up_source": "VARCHAR"},
+        # 流动性下限（2026-09-30）：影子候选需要逐行携带「前 20 日均成交额」，
+        # 展示层与报告才能按同一阈值过滤（否则只能靠当日成交额近似 —— 而当日额
+        # 在影子信号里代表缩量强度，不是流动性，两者会互相污染）。
+        "ads_shadow_pick": {"amount_ma20": "DOUBLE"},
     }
 
     # 纯派生表：内容完全可由上游数据重算，没有任何不可再生的信息。
@@ -250,6 +254,32 @@ class Storage:
                 "WHERE primary_strategy IS NULL"
             )
             logger.info("已回填 ads_recommend.primary_strategy 历史数据")
+        if "ads_shadow_pick.amount_ma20" in added:
+            # 一次性回填「前 20 个交易日均成交额」（不含当日）。
+            #
+            # ⚠️ 口径说明：这个窗口表达式的**权威定义**在
+            # `astock/shadow/limit_gene.py`（`_query_daily` / `_query_snapshot`），
+            # 这里是给历史行做一次性 bootstrap（老行当初没有该字段），
+            # 语义必须与那边一致：ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING
+            # （即前 20 个**已完成**交易日，不含当日）。
+            # 之所以放在存储层而不是 settle()：settle 的收益结算有
+            # `下一交易日必须存在` 的过滤，会把**最新信号日**的行一起挡掉，
+            # 导致那一天的流动性永远为空、展示层因此漏掉该过滤。
+            # 而流动性只依赖日线，与"有没有下一交易日"无关。
+            self.conn.execute("""
+                WITH w AS (
+                    SELECT code, date,
+                           AVG(amount) OVER (PARTITION BY code ORDER BY date
+                                             ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING)
+                               AS amount_ma20
+                    FROM dwd_daily_bar
+                    WHERE date >= (SELECT MIN(date) FROM ads_shadow_pick)
+                                  - INTERVAL 60 DAY
+                )
+                UPDATE ads_shadow_pick p SET amount_ma20 = w.amount_ma20
+                FROM w WHERE w.code = p.code AND w.date = p.date
+            """)
+            logger.info("已回填 ads_shadow_pick.amount_ma20 历史数据（前 20 个交易日均成交额）")
 
     # ---------------- 查询 ----------------
     def query_df(self, sql: str, params: Sequence[Any] | None = None) -> pd.DataFrame:

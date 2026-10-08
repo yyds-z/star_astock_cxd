@@ -277,6 +277,33 @@ def _shadow_min_score() -> float:
     return shadow_min_signal_score()
 
 
+def _shadow_min_amt() -> float:
+    """流动性下限（前 20 日均成交额），0 = 未启用。同样是引擎侧的实现。"""
+    from astock.shadow import shadow_min_amount_avg20
+
+    return shadow_min_amount_avg20()
+
+
+def _shadow_filters() -> tuple[str, list[float]]:
+    """影子名单的准入条件 → (SQL 片段, 参数)。
+
+    为什么要集中拼一次：有四个端点要过滤影子名单（最新候选、历史成绩、
+    净值曲线、校准曲线），散着写就一定会漏 —— 而漏掉的那个会静默展示
+    **引擎已不再产出**的候选，比不显示更糟。
+    """
+    from astock.shadow import shadow_min_amount_avg20
+
+    sql = "signal_score >= ?"
+    params: list[float] = [_shadow_min_score()]
+    amt = shadow_min_amount_avg20()
+    if amt > 0:
+        # amount_ma20 为 NULL 的行放行：无法判断时宁可展示也不静默隐藏。
+        # 实际上不会有 NULL —— 列迁移时已对历史行做过一次性回填。
+        sql += " AND (amount_ma20 IS NULL OR amount_ma20 >= ?)"
+        params.append(amt)
+    return sql, params
+
+
 def _shadow_status(code: str, pct: float | None) -> str:
     """按快照涨幅判定可执行性（与每日报告使用**同一套**分类口径）。"""
     if pct is None:
@@ -304,17 +331,20 @@ def shadow_latest(offset: int = Query(0, ge=0, le=60)) -> dict[str, Any]:
 
     sig_date = str(dates[offset]["date"])[:10]
     min_score = _shadow_min_score()
+    where, where_params = _shadow_filters()
     rows = reader.records(
-        "SELECT code, name, close AS sig_close, zt20, days_since_zt, vol_ratio, signal_score "
-        "FROM shadow WHERE CAST(date AS VARCHAR) = ? AND signal_score >= ? "
+        "SELECT code, name, close AS sig_close, zt20, days_since_zt, vol_ratio, "
+        f"signal_score, amount_ma20 FROM shadow WHERE CAST(date AS VARCHAR) = ? AND {where} "
         "ORDER BY signal_score DESC",
         "shadow",
-        [sig_date, min_score],
+        [sig_date, *where_params],
     )
-    # 被规则挡掉的数量也要说出来：否则用户看到"31 只变 9 只"会以为数据丢了
-    dropped = int(reader.scalar(
-        "SELECT COUNT(*) FROM shadow WHERE CAST(date AS VARCHAR) = ? AND signal_score < ?",
-        "shadow", [sig_date, min_score], default=0) or 0)
+    # 被规则挡掉的数量也要说出来：否则用户看到"36 只变 5 只"会以为数据丢了。
+    # 用"当日总数 − 通过数"计算，不重写一遍准入条件（重写就会与上面漂移）。
+    total_on_date = int(reader.scalar(
+        "SELECT COUNT(*) FROM shadow WHERE CAST(date AS VARCHAR) = ?",
+        "shadow", [sig_date], default=0) or 0)
+    dropped = max(0, total_on_date - len(rows))
 
     # 盘中实况：**只有快照日期晚于信号日**才关联。
     # 若不过滤，会把几天前那份快照的价格当成"现价"显示 —— 那是主动误导，
@@ -359,10 +389,14 @@ def shadow_latest(offset: int = Query(0, ge=0, le=60)) -> dict[str, Any]:
         "count": len(rows),
         "status_counts": counts,
         "min_signal_score": round(min_score, 1),
+        "min_amount_avg20": round(_shadow_min_amt(), 0),
         "filtered_out": dropped,
+        "total_on_date": total_on_date,
         "records": rows,
         "rules": [
             f"信号分 < {min_score:g} 已过滤（缩量不够 = 抛压未枯竭）",
+            (f"前 20 日均成交额 < {_shadow_min_amt() / 1e8:g} 亿已过滤（买不进的票不算收益）"
+             if _shadow_min_amt() > 0 else "未设流动性下限"),
             "等权分散（收益来自命中涨停的尾部，靠分散才成为正期望）",
             "市价买入、不追板；已涨停的放弃",
             "持有 D+1 / D+3 收盘，不因盘中波动提前割",
@@ -379,7 +413,7 @@ def shadow_history(days: int = Query(60, ge=2, le=400)) -> dict[str, Any]:
     # signal_score 过滤：成绩必须按**当前生效规则**统计。历史表里保留着阈值收紧前
     # 写入的低分候选（信号分是逐行属性，不会被改写），若不过滤，
     # 页面上显示的"日均超额/t"就是一条早已不再执行的规则的旧成绩。
-    min_score = _shadow_min_score()
+    where, where_params = _shadow_filters()
     rows = reader.records(
         f"""
         SELECT CAST(date AS VARCHAR) AS date,
@@ -390,11 +424,11 @@ def shadow_history(days: int = Query(60, ge=2, le=400)) -> dict[str, Any]:
                ROUND(AVG(excess), 3) AS avg_excess,
                SUM(CASE WHEN hit_limit_up THEN 1 ELSE 0 END) AS hit_zt
         FROM shadow
-        WHERE signal_score >= ? AND date >= (SELECT MAX(date) FROM shadow) - INTERVAL {int(days)} DAY
+        WHERE {where} AND date >= (SELECT MAX(date) FROM shadow) - INTERVAL {int(days)} DAY
         GROUP BY date ORDER BY date DESC
         """,
         "shadow",
-        [min_score],
+        where_params,
     )
     settled = [r for r in rows if r.get("settled")]
     if settled:
@@ -443,10 +477,11 @@ def equity(include_benchmark: bool = Query(True)) -> dict[str, Any]:
     # 影子曲线同样按当前阈值过滤：否则图上画的是旧规则的净值，
     # 与页面顶部的"信号分 ≥ N"说明自相矛盾。
     min_score = _shadow_min_score()
+    where, where_params = _shadow_filters()
     df = reader.query(
         "SELECT CAST(date AS VARCHAR) AS d, AVG(ret1) AS r FROM shadow "
-        "WHERE ret1 IS NOT NULL AND signal_score >= ? GROUP BY date ORDER BY date",
-        "shadow", [min_score])
+        f"WHERE ret1 IS NOT NULL AND {where} GROUP BY date ORDER BY date",
+        "shadow", where_params)
     if not df.empty:
         s = pd.Series((df["r"] / 100.0 - charts.COST_ROUND_TRIP).to_numpy(),
                       index=df["d"].astype(str).tolist())
@@ -548,10 +583,11 @@ def calibration(bins: int = Query(10, ge=3, le=20)) -> dict[str, Any]:
         "SELECT final_score AS score, ret_exit_d1c AS ret FROM backtest_scores",
         ("backtest_scores",),
     )
+    where, where_params = _shadow_filters()
     shadow = reader.query(
-        "SELECT signal_score AS score, ret1 AS ret FROM shadow "
-        "WHERE ret1 IS NOT NULL AND signal_score >= ?",
-        "shadow", [_shadow_min_score()])
+        f"SELECT signal_score AS score, ret1 AS ret FROM shadow "
+        f"WHERE ret1 IS NOT NULL AND {where}",
+        "shadow", where_params)
     return {
         "groups": [
             calc(main, "主链路（观察池）· final_score 分位"),
