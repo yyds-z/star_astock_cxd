@@ -434,7 +434,9 @@ class ReportBuilder:
         lines.append(f"- 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         lines.append(f"- 计划交易日：{result.get('plan_date')}")
         lines.append(f"- 参数版本：{result.get('params_version')}")
-        lines.append(f"- 股票池：{result.get('pool_size')} 只")
+        # 原「股票池：{pool_size} 只」一行随主链路删除一并移除：那个 N 是主链路
+        # 选股池的大小，主链路删除后 result 里已无 pool_size，报告头部会显示成
+        # 「None 只」（看起来像坏了）。
         lines.append(f"- AI 解读：{'LLM' if ai.get('used_llm') else '本地模板（未启用或超预算）'}")
         lines.append("")
 
@@ -458,9 +460,18 @@ class ReportBuilder:
         lines.append(f"> {ai.get('market_view') or '-'}")
         lines.append("")
 
-        if recs is None or recs.empty:
-            lines.append("今日无符合条件的影子候选。")
-            return "\n".join(lines)
+        # ---- 第四板块：涨停板（按行业）----
+        lines.extend(self._render_limit_up(result))
+
+        # 主链路（8 策略 → 评分 → 配额）已于 2026-10-08 整体删除，候选只在
+        # 「一、影子信号候选」呈现。此处原为主链路候选的渲染分支（三档名单 /
+        # 基本面 / 操作提示 / 命中统计 / 免责声明）：因 `recs` 恒为 None，它从那天起
+        # 只产出一句「今日无符合条件的影子候选。」—— 与上面刚列出的候选**直接矛盾**；
+        # 而免责声明埋在该分支内部，导致报告尾部一直没有它。现在只保留收尾。
+        # （分支内的主链路渲染代码已不可达，留待下次清理。）
+        lines.append("> 本报告由系统自动生成，仅供研究参考，不构成投资建议。")
+        lines.append("")
+        return "\n".join(lines)
 
         # 基本面（价值档的核心输入）。只对候选股查询，且用**披露日**过滤。
         data_date = str(result.get("data_date"))
@@ -548,6 +559,114 @@ class ReportBuilder:
         lines.append("")
         lines.append("> 本报告由系统自动生成，仅供研究参考，不构成投资建议。")
         return "\n".join(lines)
+
+    # ---------------- 涨停板板块 ----------------
+    def _render_limit_up(self, result: dict) -> list[str]:
+        """当日涨停板，**按行业分组**（每格：封板时间 · 名称 · 连板 · 题材）。
+
+        为什么按行业分组而不是平铺 44 行：涨停板要回答的是"今天资金在打哪个方向"，
+        平铺看不出聚簇，聚合后强度一眼可见（**家数即强度**）。呈现形式对齐行情软件的
+        「涨停板复盘」：行业（家数）+ 公司（按封板时间先后排列）。
+
+        数据来源：
+          · `dwd_limit_up`（同花顺涨停池）：封板时间 / 连板数 / 连板文本 / 涨停题材
+          · `dim_stock_industry`：**申万一级优先，缺失回退新浪行业**。实测数据日
+            2026-10-08 的 44 只涨停里，单用申万有 5 只无归属，两源合并后只剩 2 只
+            （归入「其他」）。
+
+        家数为 1 的行业并入「其他」：十几个单只行业各占一行会把有效信息淹掉。
+
+        口径提示：本板块数来自涨停池，与「三、市场环境」的涨停家数**口径不同**
+        （后者由日线按涨停价规则全市场统计），两者数值不必相等，故在正文标注。
+        """
+        data_date = str(result.get("data_date"))
+        try:
+            rows = self.storage.query_df(
+                """
+                SELECT l.code, l.name, l.first_time, l.board_text, l.boards, l.reason,
+                       COALESCE(sw.industry_name, sn.industry_name, '未分类') AS industry
+                FROM dwd_limit_up l
+                LEFT JOIN dim_stock_industry sw ON sw.code = l.code AND sw.source = 'sw'
+                LEFT JOIN dim_stock_industry sn ON sn.code = l.code AND sn.source = 'sina'
+                WHERE l.date = ?
+                ORDER BY l.first_time, l.code
+                """,
+                [data_date],
+            )
+        except Exception as exc:  # noqa: BLE001 - 涨停池缺失不应让整份报告失败
+            logger.warning("涨停板板块读取失败：%s", str(exc)[:120])
+            return []
+
+        lines: list[str] = ["## 四、涨停板（按行业）", ""]
+        if rows is None or rows.empty:
+            lines.append(f"数据日 {data_date} 无涨停记录（涨停池可能尚未采集）。")
+            lines.append("")
+            return lines
+
+        def board_badge(r: Any) -> str:
+            """连板徽标：优先上游原文（首板 / 3连板），缺失时按 boards 拼。"""
+            txt = r.get("board_text")
+            if isinstance(txt, str) and txt.strip():
+                return txt.strip()
+            try:
+                b = int(r.get("boards") or 1)
+            except (TypeError, ValueError):
+                b = 1
+            return "首板" if b <= 1 else f"{b}连板"
+
+        def theme_tag(r: Any) -> str:
+            """题材只取第一段：上游原文形如 '固态电池+钠离子电池+AI PC键盘'。"""
+            txt = r.get("reason")
+            if not isinstance(txt, str) or not txt.strip():
+                return ""
+            return txt.split("+")[0].strip()
+
+        def cell(items: list) -> str:
+            parts = []
+            for r in items:
+                badge = board_badge(r)
+                # 连板 ≥2 加粗（打板视角最该注意的部分）；首板不加粗，避免满屏强调
+                if not badge.startswith("首板"):
+                    badge = f"**{badge}**"
+                tag = theme_tag(r)
+                parts.append(
+                    f"{str(r.get('first_time') or '')} {r['name']}"
+                    f"({badge}{'·' + tag if tag else ''})"
+                )
+            return "、".join(parts)
+
+        groups: dict[str, list] = {}
+        for _, r in rows.iterrows():
+            groups.setdefault(str(r["industry"]), []).append(r)
+
+        # 家数为 1 的行业、以及完全没有行业映射的（'未分类'），一并归入「其他」：
+        # 前者单只占一行会把有效信息淹掉，后者本就无分组意义。
+        multi = sorted(
+            ((k, v) for k, v in groups.items() if len(v) > 1 and k != "未分类"),
+            key=lambda kv: (-len(kv[1]), kv[0]),
+        )
+        solo = [r for k, v in groups.items() if len(v) == 1 or k == "未分类" for r in v]
+        try:
+            n_multi_board = int((rows["boards"].fillna(1) > 1).sum())
+        except Exception:  # noqa: BLE001
+            n_multi_board = 0
+
+        lines.append(
+            f"数据日 {data_date} 共 **{len(rows)}** 只涨停（连板 ≥2 的 {n_multi_board} 只）。"
+            "格式：`封板时间 名称(连板·题材)`，题材取上游第一段；连板 ≥2 加粗。"
+        )
+        lines.append("")
+        lines.append(f"> 口径：家数来自同花顺涨停池（{len(rows)} 只），与「三、市场环境」的"
+                     "涨停家数统计口径不同，数值不必相等。")
+        lines.append("")
+        lines.append("| 行业（家数） | 公司 |")
+        lines.append("|---|---|")
+        for ind, items in multi:
+            lines.append(f"| {ind}（{len(items)}） | {cell(items)} |")
+        if solo:
+            lines.append(f"| 其他（{len(solo)}） | {cell(solo)} |")
+        lines.append("")
+        return lines
 
     # ---------------- 影子复盘板块 ----------------
     def _render_shadow_review(self) -> list[str]:
