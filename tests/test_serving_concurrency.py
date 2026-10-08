@@ -37,12 +37,12 @@ from astock.storage.serving import get_reader, serving_dir  # noqa: E402
 CASES = [
     ("market_regime", "SELECT * FROM market_regime ORDER BY date DESC LIMIT 1"),
     ("market_regime", "SELECT * FROM market_regime ORDER BY date DESC LIMIT 120"),
-    ("recommend", "SELECT DISTINCT rec_date FROM recommend ORDER BY rec_date DESC LIMIT 1"),
-    ("review", "SELECT * FROM review LIMIT 10"),
+    ("shadow", "SELECT DISTINCT date FROM shadow ORDER BY date DESC LIMIT 1"),
+    ("shadow_review", "SELECT * FROM shadow_review LIMIT 10"),
     ("dim_stock", "SELECT * FROM dim_stock LIMIT 10"),
-    ("feature_latest", "SELECT * FROM feature_latest LIMIT 10"),
+    ("intraday", "SELECT * FROM intraday LIMIT 10"),
     ("stock_bars", "SELECT * FROM stock_bars ORDER BY date DESC LIMIT 50"),
-    ("strategy_stats", "SELECT * FROM strategy_stats LIMIT 10"),
+    ("sector_strength", "SELECT * FROM sector_strength LIMIT 10"),
 ]
 
 

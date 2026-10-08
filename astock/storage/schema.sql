@@ -128,50 +128,6 @@ CREATE TABLE IF NOT EXISTS dwd_dragon_tiger (
 -- 与同花顺 `auction/snapshot` 接口保留但表已移除 —— 决策链路从未读取它，
 -- 属零使用数据。若将来要做「竞价类影子信号」，按 git 历史还原本表定义即可。
 
--- ---------- 汇总层：财务指标（来源：同花顺 Financial-API）----------
--- 解决价值档「只有技术面、没有基本面」的问题：原价值档仅用 MA20>MA60>MA120
--- 做趋势代理，实测在所有市场状态下都是最弱档。
---
--- 存**比率**而非原始金额：ROE / 资产负债率 / 同比增速 才是可跨公司比较的量，
--- 原始金额受规模影响无法直接用于选股。同比在此处一次算完（需要用到上一期数据）。
--- 注意：本表是**多期历史**（按 period_end 区分），因此天然支持按报告期做
--- 时点回测（避免用未来财报选股的前视偏差）。
---
--- ⚠️ 口径陷阱（下游务必遵守）：A 股季报是**累计口径** ——
--- Q1=3个月、Q2=6个月、Q3=9个月、Q4=12个月。
--- 因此 roe / revenue / net_profit 这类**流量指标跨报告期不可直接比较**
--- （拿 Q1 的 9.7% ROE 去比 Q4 的 32.4% 是错的）。
--- 可比的只有：
---   1. 同比列（revenue_yoy / profit_yoy）—— 已在同 fiscal_period 内计算，可直接用；
---   2. 同 fiscal_period 的不同年份之间比较。
--- 若要做跨公司横向对比，请统一取 `fiscal_period = 'FY'`（年报）。
---
--- ⚠️ 回测必须用 `report_date`（披露日）过滤，不能用 `period_end`：
--- 报告期末只是会计区间终点，财报实际公开要晚 1~4 个月。
--- 按 period_end 取数等于用了当时还不存在的信息，会把历史业绩虚高到无法复现。
--- 例：2026 中报 period_end=2026-06-30，但 report_date 可能是 2026-08-29。
-CREATE TABLE IF NOT EXISTS dws_finance_metrics (
-    code                VARCHAR,
-    period_end          DATE,      -- 报告期末（会计区间终点）
-    report_date         DATE,      -- **披露日**：财报实际公开的日期
-    fiscal_year         INTEGER,
-    fiscal_period       VARCHAR,   -- FY / Q1 / Q2 / Q3 / Q4
-    revenue             DOUBLE,    -- 营业收入（元）
-    net_profit          DOUBLE,    -- 净利润（元）
-    parent_net_profit   DOUBLE,    -- 归母净利润（元）
-    eps                 DOUBLE,    -- 基本每股收益（元/股）
-    total_assets        DOUBLE,
-    total_debt          DOUBLE,
-    equity              DOUBLE,
-    cash_flow_net       DOUBLE,    -- 经营活动现金流净额（元）
-    debt_ratio          DOUBLE,    -- 资产负债率(%)
-    roe                 DOUBLE,    -- ROE(%)：归母净利 / 股东权益
-    revenue_yoy         DOUBLE,    -- 营收同比(%)，负基数时为 NULL
-    profit_yoy          DOUBLE,    -- 归母净利同比(%)，负基数时为 NULL
-    updated_at          TIMESTAMP,
-    PRIMARY KEY (code, period_end)
-);
-
 -- ---------- 明细层 ----------
 CREATE TABLE IF NOT EXISTS dwd_daily_bar (
     code      VARCHAR,
@@ -199,65 +155,6 @@ CREATE TABLE IF NOT EXISTS dwd_index_bar (
     volume  DOUBLE,
     amount  DOUBLE,
     pct_chg DOUBLE,
-    PRIMARY KEY (code, date)
-);
-
--- ---------- 汇总层：因子宽表（核心，全部由 SQL 窗口函数计算）----------
-CREATE TABLE IF NOT EXISTS dws_feature (
-    code            VARCHAR,
-    date            DATE,
-    open            DOUBLE,
-    high            DOUBLE,
-    low             DOUBLE,
-    close           DOUBLE,
-    preclose        DOUBLE,
-    volume          DOUBLE,
-    amount          DOUBLE,
-    turn            DOUBLE,
-    pct_chg         DOUBLE,
-    -- 均线
-    ma5             DOUBLE,
-    ma10            DOUBLE,
-    ma20            DOUBLE,
-    ma60            DOUBLE,
-    ma120           DOUBLE,
-    prev_ma5        DOUBLE,
-    prev_ma20       DOUBLE,
-    prev_ma60       DOUBLE,
-    -- 量能
-    vol_ma5         DOUBLE,
-    vol_ma20        DOUBLE,
-    vol_ma20_prev   DOUBLE,
-    vol_ratio       DOUBLE,
-    amount_ma20     DOUBLE,
-    -- 前值
-    prev_close      DOUBLE,
-    prev2_close     DOUBLE,
-    prev_volume     DOUBLE,
-    prev_high       DOUBLE,
-    -- 区间极值
-    hh20_prev       DOUBLE,     -- 前 20 日最高价（不含当日），海龟突破用
-    hh10            DOUBLE,
-    ll10            DOUBLE,
-    hh40            DOUBLE,
-    ll40            DOUBLE,
-    hh120           DOUBLE,
-    ll120           DOUBLE,
-    -- 动量与形态
-    pct_5d          DOUBLE,
-    pct_20d         DOUBLE,
-    pct_60d         DOUBLE,
-    pos_60          DOUBLE,     -- 60 日区间位置 0~1
-    amplitude_20    DOUBLE,     -- 20 日平均振幅(%)
-    rps120          DOUBLE,     -- 120 日相对强度百分位（横截面）
-    float_mv        DOUBLE,     -- 流通市值(元)
-    -- 结构标记
-    listed_days     INTEGER,
-    is_st           BOOLEAN,
-    is_new_stock    BOOLEAN,
-    is_limit_up     BOOLEAN,
-    is_limit_down   BOOLEAN,
-    is_yang         BOOLEAN,
     PRIMARY KEY (code, date)
 );
 
@@ -312,74 +209,6 @@ CREATE TABLE IF NOT EXISTS dws_sector_strength (
     -- 百分位排名，会出现「19 只股票的新浪小板块」和「479 只的申万大行业」
     -- 同台竞争的情况，强度分失去可比性。因此强度只在**同一体系内**排名。
     PRIMARY KEY (date, source, industry_name)
-);
-
--- 【已删除】研究产物三表（2026-09-30）
---   dws_limit_factor   涨停因子宽表（18,701 行）
---   dws_dragon_factor  龙虎榜因子宽表（13,189 行）
---   dws_style_matrix   状态 × 规则表现矩阵（42 行）
--- 依据：三者的研究结论已固化进 config/settings.yaml 与 config/data_registry.yaml
--- 的注释，且**没有任何生产代码读取**（style_matrix 的 42 个格子中"显著更好"为 0，
--- 状态级绑定无正向依据）。构建器模块（features/limit_factor.py、dragon_factor.py、
--- market/style_matrix.py）与依赖它们的 entry_cost 过滤同批移除。
--- 若将来解冻后要做新方向研究，按 git 历史还原本段即可。
--- ---------- 应用层：复盘归因（LLM）----------
--- 存「为什么赚/为什么亏」。没有它，策略迭代只能靠猜：
--- 胜率下降时无法区分「市场环境变了」（调权重）与「选股逻辑失效」（改策略），
--- 而这两者的应对完全相反。
--- category 是**固定枚举**（见 astock/review/attribution.CATEGORIES），
--- 不让模型自由发挥：自由文本无法聚合，而聚合统计才是迭代的依据。
--- 独立成表而非加列到 ads_review：归因会随模型升级重算，主表只存客观结果。
-CREATE TABLE IF NOT EXISTS ads_review_attribution (
-    rec_id      VARCHAR PRIMARY KEY,
-    outcome     VARCHAR,     -- success / failure / flat
-    category    VARCHAR,     -- 固定枚举 key
-    reason      VARCHAR,     -- 模型给出的原因（20 字以内）
-    lesson      VARCHAR,     -- 可执行的改进（20 字以内）
-    model       VARCHAR,     -- 产生该归因的模型，便于换模型后对比
-    created_at  TIMESTAMP
-);
-
--- ---------- 应用层：推荐记录 ----------
-CREATE TABLE IF NOT EXISTS ads_recommend (
-    rec_id            VARCHAR PRIMARY KEY,
-    rec_date          DATE,        -- 生成日期
-    trade_date        DATE,        -- 计划交易日
-    market_state      VARCHAR,
-    market_label      VARCHAR,
-    tier              VARCHAR,     -- short / swing / value
-    tier_rank         INTEGER,     -- 档内排名
-    code              VARCHAR,
-    name              VARCHAR,
-    strategy          VARCHAR,     -- 全部命中策略拼接（展示用）
-    primary_strategy  VARCHAR,     -- 得分最高的主策略（按策略归因统计用）
-    final_score       DOUBLE,
-    strategy_score    DOUBLE,
-    factor_score      DOUBLE,
-    market_fit        DOUBLE,    -- 【已废弃】原「档位权重归一化」，档内常数、不影响排序，新记录写 NULL
-    risk_penalty      DOUBLE,
-    reasons           VARCHAR,     -- JSON 数组
-    score_detail      VARCHAR,     -- JSON：评分拆解
-    params_version    VARCHAR,
-    created_at        TIMESTAMP
-);
-
--- ---------- 应用层：T+1 复盘 ----------
-CREATE TABLE IF NOT EXISTS ads_review (
-    rec_id          VARCHAR PRIMARY KEY,
-    rec_date        DATE,
-    code            VARCHAR,
-    tier            VARCHAR,
-    strategy        VARCHAR,
-    next_date       DATE,
-    next_open       DOUBLE,
-    next_close      DOUBLE,
-    next_pct_chg    DOUBLE,     -- 次日涨跌幅(%)
-    next_high_pct   DOUBLE,     -- 次日最大涨幅(%)
-    next_low_pct    DOUBLE,     -- 次日最大回撤(%)
-    hold3_pct       DOUBLE,     -- 持有 3 日收益(%)
-    result          VARCHAR,    -- win / loss / flat / pending
-    updated_at      TIMESTAMP
 );
 
 -- ---------- 明细层：盘中快照 ----------
@@ -485,17 +314,6 @@ CREATE TABLE IF NOT EXISTS sys_llm_usage (
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     updated_at  TIMESTAMP
-);
-
--- 每轮选股的策略命中统计，用于观察各策略在不同市场环境下的产出能力
-CREATE TABLE IF NOT EXISTS sys_strategy_stats (
-    data_date   DATE,
-    tier        VARCHAR,
-    strategy    VARCHAR,
-    label       VARCHAR,
-    hits        INTEGER,
-    updated_at  TIMESTAMP,
-    PRIMARY KEY (data_date, strategy)
 );
 
 -- ---------- 应用层：影子信号复盘（归因）----------

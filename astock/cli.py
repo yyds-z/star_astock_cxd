@@ -52,15 +52,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_daily.add_argument("--no-llm", action="store_true", help="强制使用本地模板报告")
     p_daily.add_argument("--workers", type=int, default=4, help="增量采集并行进程数")
 
-    p_factor = sub.add_parser("factor", help="重新构建因子表")
-    p_factor.add_argument("--all", action="store_true", help="全量重建（默认增量）")
 
     p_regime = sub.add_parser("regime", help="重新计算市场状态")
     p_regime.add_argument("--stats", action="store_true", help="同时输出各状态的天数分布")
 
-    p_review = sub.add_parser("review", help="T+1 复盘")
-    p_review.add_argument("--summary", action="store_true", help="只输出统计汇总")
-    p_review.add_argument("--days", type=int, default=60, help="统计天数")
 
     p_serve = sub.add_parser("serve", help="启动本地 Web 服务")
     p_serve.add_argument("--host", type=str, default="127.0.0.1")
@@ -76,11 +71,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # 策略体检：与"数据体检"（check）不同，这个跑的是**评价**——
     # 对每个策略生成全历史候选，用可实现口径给成绩并做样本外判定。
-    p_cu = sub.add_parser("checkup", help="策略体检：用可实现口径评估各策略并给出样本外判定")
-    p_cu.add_argument("--days", type=int, default=250, help="回看交易日数（默认 250）")
-    p_cu.add_argument("--only", type=str, default=None, help="只体检指定策略（逗号分隔）")
-    p_cu.add_argument("--refresh", action="store_true",
-                      help="忽略候选缓存，重新生成（默认复用缓存：生成要 7 分钟，打分只要几秒）")
 
     p_export = sub.add_parser("export", help="导出展示层快照（Web 端只读这份 Parquet）")
     p_export.add_argument("--bars-days", type=int, default=250, help="个股 K 线快照保留的交易日数")
@@ -97,18 +87,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_dump.add_argument("--days", type=int, default=10,
                         help="回看天数，默认 10（>10 会改用 10 年全量导出）")
 
-    p_fin = sub.add_parser("finance", help="采集财务三表与指标（同花顺源，每只 3 次请求）")
-    p_fin.add_argument("--codes", type=str, default=None, help="指定股票，逗号分隔")
-    p_fin.add_argument("--all", action="store_true",
-                       help="全市场回填（约 17 小时，建议夜间跑；可随时中断续传）")
-    p_fin.add_argument("--limit", type=int, default=0, help="配合 --all，限制本次采集只数")
-    p_fin.add_argument("--period", type=str, default="quarterly",
-                       choices=["quarterly", "annual"], help="报告期类型，默认 quarterly")
-    p_fin.add_argument("--show", type=int, default=0, help="顺便展示最新一期指标前 N 只")
 
-    p_attr = sub.add_parser("attribution", help="复盘归因（LLM）：归因推荐成功/失败原因")
-    p_attr.add_argument("--limit", type=int, default=50, help="本次最多归因多少条，默认 50")
-    p_attr.add_argument("--days", type=int, default=90, help="统计回看天数，默认 90")
 
     p_sector = sub.add_parser("sector", help="同步行业/板块映射（板块强度由本地日线自算）")
     p_sector.add_argument("--coverage", action="store_true", help="只查看映射覆盖率，不采集")
@@ -156,36 +135,6 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="backfill 结束日 YYYY-MM-DD")
     p_sh.add_argument("--days", type=int, default=60, help="status 统计的回看天数")
 
-    p_sk = sub.add_parser("skills", help="策略 Skill 库：查看 / 同步 / 统计历史成功率")
-    p_sk.add_argument(
-        "action", nargs="?", default="list",
-        choices=["list", "show", "sync", "stats"],
-        help="list=列出全部；show=看单个；sync=重新落盘（含参数变更记版本）；stats=刷新统计",
-    )
-    p_sk.add_argument("name", nargs="?", default=None, help="配合 show 使用，如 skills show turtle_trade")
-
-    p_ch = sub.add_parser("charts", help="净值曲线与校准曲线：重绘并导出 SVG / 交互 HTML")
-    p_ch.add_argument("--run-id", type=str, default=None,
-                      help="回测轮次，默认取最新一轮")
-    p_ch.add_argument("--no-html", action="store_true", help="只出 SVG，不生成交互 HTML")
-
-    p_bt = sub.add_parser("backtest", help="样本外验证：逐日回放并统计各策略真实胜率")
-    p_bt.add_argument("--start", type=str, default=None, help="开始日期 YYYY-MM-DD")
-    p_bt.add_argument("--end", type=str, default=None, help="结束日期 YYYY-MM-DD")
-    p_bt.add_argument("--months", type=int, default=None, help="便捷参数：只回测最近 N 个月")
-    p_bt.add_argument("--tiers", type=str, default=None,
-                      help="只回测指定档位，逗号分隔，如 swing,value")
-    p_bt.add_argument("--top-n", type=int, default=None, help="每档取前 N 只，默认取配置")
-    p_bt.add_argument("--all-boards", action="store_true",
-                      help="按**全市场口径**回测（含科创板/北交所）；"
-                           "默认只算可交易子集（universe.boards）")
-    p_bt.add_argument("--split", type=float, default=0.6,
-                      help="观察期占比，用于检查参数稳定性，默认 0.6")
-    p_bt.add_argument("--no-persist", action="store_true", help="不写入 ads_backtest 表")
-    p_bt.add_argument("--list", action="store_true", help="列出历史回测运行后退出")
-    p_bt.add_argument("--report-only", action="store_true",
-                      help="不重新回放，直接用最近一次回测的落库结果重算并重出报告")
-
     return parser
 
 
@@ -223,17 +172,6 @@ def cmd_backfill(args) -> int:
     print("提示：中断后直接重跑本命令即可续传（已入库的数据会自动跳过）")
     print("      全市场进度可用 python -m astock.cli status 查看")
     return 0
-
-
-def cmd_factor(args) -> int:
-    from astock.features.builder import FeatureBuilder
-
-    builder = FeatureBuilder()
-    n = builder.rebuild_all() if args.all else builder.build()
-    print(f"因子表更新完成：{n} 行")
-    return 0
-
-
 def cmd_regime(args) -> int:
     import pandas as pd
 
@@ -466,35 +404,6 @@ def cmd_export(args) -> int:
     for name, rows in (meta.get("tables") or {}).items():
         print(f"  {name}: {rows} 行")
     return 0
-
-
-def cmd_review(args) -> int:
-    from astock.review.reviewer import Reviewer
-
-    reviewer = Reviewer()
-    stats = reviewer.review()
-    if not args.summary:
-        print("复盘结果：", stats)
-
-    summary = reviewer.summary(days=args.days)
-    if not summary.get("count"):
-        print("暂无已完成的复盘记录（推荐后需等到次一交易日收盘才有数据）")
-        return 0
-
-    print(f"\n近 {args.days} 天复盘统计：")
-    print(f"  样本 {summary['count']} 条 | 胜率 {summary['win_rate']}% "
-          f"| 平均次日收益 {summary['avg_return']}%")
-    if summary.get("avg_max_gain") is not None:
-        print(f"  平均最大涨幅 {summary['avg_max_gain']}% | 平均最大回撤 {summary['avg_max_drawdown']}%")
-    print("\n  分档表现：")
-    for tier, s in (summary.get("by_tier") or {}).items():
-        print(f"    {tier}: {s['count']} 条，胜率 {s['win_rate']}%，平均收益 {s['avg_return']}%")
-    print("\n  分策略表现：")
-    for name, s in (summary.get("by_strategy") or {}).items():
-        print(f"    {name}: {s['count']} 条，胜率 {s['win_rate']}%，平均收益 {s['avg_return']}%")
-    return 0
-
-
 def cmd_serve(args) -> int:
     import uvicorn
 
@@ -655,61 +564,6 @@ def cmd_dump_daily(args) -> int:
         print(f"  无需补数（库内已是最新 {stats.get('latest_before')}）")
     print("=" * 76)
     return 0
-
-
-def cmd_finance(args) -> int:
-    """财务数据采集（同花顺源，每只股票 3 次请求）。
-
-    默认只采「最近一次推荐的候选股」，因为全市场回填是 17 小时级的任务；
-    需要全量时用 --all（建议夜间跑）。
-    """
-    from astock.data.hithink import HithinkCollector
-    from astock.storage.db import get_storage
-
-    storage = get_storage()
-    try:
-        collector = HithinkCollector(storage)
-    except RuntimeError as exc:
-        print(f"[!] {exc}")
-        return 1
-
-    if args.all:
-        codes = collector.pending_finance_codes()
-        if args.limit:
-            codes = codes[: args.limit]
-        # 每只 2 次请求（不取现金流量表，见 HithinkCollector._statements），
-        # 且只采可交易板块 —— 两者合计把回填从约 19 小时压到约 11 小时。
-        est = len(codes) * 2 * 4.2 / 60
-        print(f"财务回填（可交易板块）：待采 {len(codes)} 只，每只 2 次请求，"
-              f"限流下约需 {est / 60:.1f} 小时（可中断续传）")
-    elif args.codes:
-        codes = [c.strip() for c in args.codes.split(",") if c.strip()]
-    else:
-        target = storage.query_value("SELECT MAX(trade_date) FROM ads_recommend")
-        if target is None:
-            print("没有推荐记录。可用 --codes 手动指定，或 --all 全市场回填。")
-            return 1
-        df = storage.query_df(
-            "SELECT DISTINCT code FROM ads_recommend WHERE trade_date = ?", [target]
-        )
-        codes = df["code"].tolist()
-        if not codes:
-            print(f"{target} 无候选股记录。可用 --codes 手动指定。")
-            return 1
-        print(f"采集 {target} 的候选股财务：{len(codes)} 只")
-
-    if not codes:
-        print("没有待采集的股票。")
-        return 0
-
-    n = collector.collect_financials(codes, period=args.period, limit=12)
-    print(f"财务采集完成：{len(codes)} 只股票，共 {n} 期报表")
-
-    if args.show:
-        _print_finance(args.show)
-    return 0
-
-
 def _print_finance(n: int) -> None:
     """展示最新一期财务指标（价值档的核心输入）。"""
     import pandas as pd  # cli.py 模块级没有导入 pandas，必须局部导入
@@ -753,45 +607,6 @@ def _print_finance(n: int) -> None:
     print("-" * 88)
     print("  说明：这些是价值档取代「纯技术面代理」的基本面输入。")
     print("=" * 88)
-
-
-def cmd_attribution(args) -> int:
-    """复盘归因（LLM）：把「涨了/跌了」变成「为什么」。"""
-    from astock.review.attribution import Attributor
-
-    attributor = Attributor()
-    stats = attributor.run(limit=args.limit)
-
-    if stats.get("skipped_reason"):
-        print(f"待归因 {stats['pending']} 条，但已跳过：{stats['skipped_reason']}")
-        return 0
-    if not stats["pending"]:
-        print("暂无可归因的记录（需先有已完成的复盘结果）。")
-    else:
-        print(
-            f"归因完成：待处理 {stats['pending']} 条，"
-            f"成功 {stats['attributed']} 条，失败 {stats['failed']} 条"
-        )
-
-    summary = attributor.summary(days=args.days)
-    if not summary.get("count"):
-        return 0
-
-    print()
-    print("=" * 72)
-    print(f"  近 {args.days} 天归因统计（样本 {summary['count']} 条）")
-    print("=" * 72)
-    print(f"  {'原因分类':<26}{'次数':>6}{'平均收益':>10}{'胜率':>8}")
-    print("-" * 72)
-    for name, s in summary["by_category"].items():
-        ret = f"{s['avg_return']:+.2f}%" if s["avg_return"] is not None else "-"
-        print(f"  {name:<26}{s['count']:>6}{ret:>10}{s['win_rate']:>7.1f}%")
-    print("-" * 72)
-    print("  用途：次数最多的失败类别，就是最值得优先修的问题。")
-    print("=" * 72)
-    return 0
-
-
 def _print_limit_pool(n: int) -> None:
     """打印最新一天的涨停板（按封单额排序），并给出连板分布。"""
     from astock.storage.db import get_storage
@@ -1040,53 +855,6 @@ def _sync_skills(storage, label: str = "Skill 库") -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"提示：{label}同步失败（不影响本次结果）：{str(exc)[:160]}")
         print("      可稍后单独执行：python -m astock.cli skills sync")
-
-
-def cmd_skills(args) -> int:
-    """策略 Skill 库操作。"""
-    from astock.skills import SkillsStore
-    from astock.storage.db import try_get_storage
-
-    storage = try_get_storage()
-    if storage is None:
-        print("提示：数据库当前被其它进程占用（可能在采集/回测），")
-        print("      本次将不更新历史成功率，仅刷新档案与参数快照。")
-        print("      采集结束后重新执行 `skills sync` 即可补上表现数据。\n")
-    store = SkillsStore(storage)
-
-    if args.action in ("sync", "stats", "list"):
-        result = store.sync()
-
-    if args.action == "sync":
-        print(f"Skill 库已同步：{result['root']}")
-        print(f"共 {len(result['skills'])} 个策略：" + "、".join(result["skills"]))
-        return 0
-
-    if args.action == "stats":
-        return _print_skill_table(store)
-
-    if args.action == "list":
-        return _print_skill_table(store)
-
-    # show
-    name = args.name
-    if not name:
-        print("用法：python -m astock.cli skills show <策略名>   （策略名见 skills list）")
-        return 2
-    skill = store.get_skill(name)
-    if skill is None:
-        print(f"未找到策略：{name}")
-        return 1
-    print(skill.get("skill_md", ""))
-    print("\n--- 文件位置 ---")
-    print(f"  目录：{skill['dir']}")
-    for key in ("meta.yaml", "performance.json"):
-        print(f"  {key}：{skill['dir']}\\{key}")
-    for ref in (skill.get("references") or {}):
-        print(f"  {ref}.md：{skill['dir']}\\references\\{ref}.md")
-    return 0
-
-
 def _print_skill_table(store) -> int:
     skills = store.list_skills()
     if not skills:
@@ -1172,196 +940,12 @@ def _report_from_stored(storage_provider) -> int:
     for note in bt_report.conclusions(stats):
         print("  ·", note)
     return 0
-
-
-def cmd_charts(args) -> int:
-    """重绘净值曲线与校准曲线（不跑回测，只读已有结果）。
-
-    为什么要独立命令：图形是**展示层**，重绘不需要 20 分钟的回测；
-    调样式、换区间、换轮次时都该秒级看到结果。
-    """
-    from astock.backtest import charts
-
-    run_id = getattr(args, "run_id", None) or str(
-        charts.get_storage().query_value("SELECT MAX(run_id) FROM ads_backtest") or ""
-    )
-    curves = charts.build_curves(run_id=run_id)
-    if not curves:
-        print("无可绘制的曲线：需先跑一次 backtest（主链路）并确保影子信号已结算")
-        return 1
-
-    if curves[0].dates:
-        print(f"共同区间：{curves[0].dates[0]} ~ {curves[0].dates[-1]}"
-              f"（{len(curves[0].dates)} 个交易日）")
-    print(f"\n{'曲线':<22}{'交易日':>7}{'累计':>10}{'年化':>9}{'最大回撤':>10}"
-          f"{'Sharpe':>8}{'日超额':>10}{'t':>7}")
-    print("-" * 84)
-    for c in curves:
-        s, e = c.stats(), c.excess or {}
-        ann = s.get("annual")
-        print(f"{c.name:<22}{s.get('days', 0):>7}{s.get('total', 0) * 100:>9.2f}%"
-              f"{(ann * 100 if ann is not None else float('nan')):>8.1f}%"
-              f"{s.get('max_dd', 0) * 100:>9.1f}%{s.get('sharpe') or 0:>8.2f}"
-              f"{e.get('mean', 0) * 100:>9.3f}%{e.get('t', 0):>7.2f}")
-    print("-" * 84)
-    print("判据：看「日超额 / t」，不要只看净值高低 —— 净值受区间与波动拖累影响。")
-
-    out = charts.get_config_out_dir() if hasattr(charts, "get_config_out_dir") else None
-    if out is None:
-        from astock.config import get_config
-
-        out = get_config().data_dir / "backtest"
-    stamp = run_id or "latest"
-    svg = charts.render_equity_svg(curves, subtitle="各自原生口径 · 扣双边 0.3% 成本")
-    (out / f"charts_{stamp}_equity.svg").write_text(svg, encoding="utf-8")
-    print(f"\n净值曲线 SVG：{out / f'charts_{stamp}_equity.svg'}")
-
-    if not getattr(args, "no_html", False):
-        calibs = {
-            "主链路（观察池）": charts.calibration_main(charts.get_storage(), run_id),
-            "影子信号（决策依据）": charts.calibration_shadow(charts.get_storage()),
-        }
-        html_txt = charts.render_equity_html(curves, calibs)
-        p = out / f"charts_{stamp}.html"
-        p.write_text(html_txt, encoding="utf-8")
-        print(f"交互 HTML（可框选缩放）：{p}")
-    return 0
-
-
-def cmd_backtest(args) -> int:
-    """样本外验证：按日回放历史，统计各策略真实表现。"""
-    from datetime import date, timedelta
-
-    from astock.backtest import engine as bt_engine
-    from astock.backtest import report as bt_report
-    from astock.features.builder import FeatureBuilder
-    from astock.market.regime import MarketRegime
-    from astock.storage.db import get_storage
-
-    if args.list:
-        return _list_backtest_runs()
-
-    if args.report_only:
-        return _report_from_stored(storage_provider=get_storage)
-
-    storage = get_storage()
-    # 回测依赖因子表与市场状态，缺失时自动补算（均为幂等操作）
-    if storage.table_count("dws_feature") == 0:
-        print("因子表为空，先构建因子 …")
-        FeatureBuilder(storage).build()
-    if storage.table_count("dws_market_regime") == 0:
-        print("市场状态表为空，先计算 …")
-        MarketRegime(storage).compute()
-
-    start = _parse_date(args.start)
-    end = _parse_date(args.end)
-    if args.months and start is None:
-        end = end or date.today()
-        start = end - timedelta(days=int(args.months * 30.5))
-
-    tiers = [t.strip() for t in args.tiers.split(",")] if args.tiers else None
-
-    # 口径：默认用可交易子集（你真能买的标的）；--all-boards 则跑全市场做对比。
-    # 两者结果**不可混用**，因此显式提示，避免把不同口径的数字拿去对比调参。
-    boards = ["main", "gem", "star", "bj"] if getattr(args, "all_boards", False) else None
-    if boards:
-        print("注意：本次按【全市场口径】回测（含科创板/北交所），"
-              "结果不可与可交易子集口径混用。")
-    engine = bt_engine.BacktestEngine(storage, boards=boards)
-    stats = engine.run(
-        start=start,
-        end=end,
-        tiers=tiers,
-        top_n=args.top_n,
-        split=args.split,
-        persist=not args.no_persist,
-    )
-
-    paths = bt_report.save(stats)
-
-    # 回测结果直接回填到 Skill 库的历史成功率
-    _sync_skills(storage, "Skill 库")
-
-    overall = stats["overall"]
-
-    print()
-    print("=" * 68)
-    # 口径（2026-09-24 P0）：win_rate / avg_win / avg_loss / 盈亏比 全部基于
-    # **可实现口径** ret_exit_d1c（买入次日收盘卖）；ret1（当天收盘卖）在
-    # T+1 下不可实现，只作诊断对照 —— 两者并排，防止再出现"换口径结论反转"。
-    print(f"  信号数：{overall['count']}")
-    print(f"  【可实现·次日收盘卖】胜率：{overall['win_rate']}%"
-          f"　|　平均：{overall.get('avg_ret_exit_d1c')}%"
-          f"　|　最早合法（次日开盘卖）：{overall.get('avg_ret_exit_d1o')}%")
-    print(f"  【诊断·不可实现 ret1】平均：{overall.get('avg_ret1')}%"
-          f"　|　胜率：{overall.get('win_rate_ret1')}%")
-    print(f"  平均盈利：{overall['avg_win']}%　|　平均亏损：{overall['avg_loss']}%"
-          f"　|　盈亏比：{overall['profit_loss_ratio']}")
-
-    by_strategy = stats.get("by_strategy")
-    if by_strategy is not None and not by_strategy.empty:
-        print("-" * 68)
-        print("  分策略表现（可实现口径）：")
-        for _, r in by_strategy.iterrows():
-            print(f"    {str(r['strategy'])[:22]:<22} 样本 {int(r['count']):>4}"
-                  f" | 胜率 {str(r['win_rate']):>5}%"
-                  f" | 次日收盘 {str(r.get('avg_ret_exit_d1c')):>6}%"
-                  f" | 5日 {str(r.get('avg_ret5')):>6}%")
-
-    print("=" * 68)
-    print(f"  Markdown 报告：{paths['markdown']}")
-    if "csv" in paths:
-        print(f"  明细 CSV：{paths['csv']}")
-    return 0
-
-
 def _parse_date(value: str | None):
     from datetime import date as _d
 
     if not value:
         return None
     return _d.fromisoformat(value)
-
-
-def cmd_checkup(args) -> int:
-    """策略体检：对每个策略跑全历史候选，用统一裁判给出可实现口径成绩。
-
-    这是"策略去留"的唯一依据 —— 主链路回测只记最终入选的 15 只，
-    回答不了"turtle_trade 本身准不准"（它每天命中 76 只）。
-    """
-    from astock.eval.checkup import collect_hits, format_report, score_strategy
-    from astock.eval.judge import pool_benchmark
-    from astock.storage.db import get_storage
-    from astock.strategy import build_strategies
-
-    storage = get_storage()
-    only = {s.strip() for s in (args.only or "").split(",") if s.strip()}
-    strategies = [s for tier in build_strategies().values() for s in tier
-                  if not only or s.name in only]
-    days_df = storage.query_df(
-        "SELECT DISTINCT date FROM dws_feature ORDER BY date DESC LIMIT ?", [int(args.days)])
-    days = sorted(days_df["date"].tolist())
-    if not days:
-        print("因子表为空，无法体检。请先跑：python -m astock.cli factor --all")
-        return 1
-
-    print(f"体检区间：{days[0]} ~ {days[-1]}（{len(days)} 个交易日）")
-    print(f"策略数：{len(strategies)}　正在逐日生成候选（每日只加载一次截面）…")
-    bench = pool_benchmark(storage)
-    all_hits = collect_hits(storage, strategies, days,
-                            cache_dir="data/checkup", refresh=bool(args.refresh))
-    results = []
-    for s in strategies:
-        hits = all_hits[s.name]
-        if hits.empty:
-            results.append({"label": s.label, "days": 0, "verdict": "无信号"})
-            continue
-        results.append(score_strategy(hits, bench, s.label, n_tests=len(strategies)))
-    print()
-    print(format_report(results, len(strategies)))
-    return 0
-
-
 def cmd_check(args) -> int:
     """数据体检：区分「真退市 / 长期停牌」与「采集失败」，并列出滞后股票。"""
     from astock.storage.db import get_storage
@@ -1412,27 +996,19 @@ def cmd_check(args) -> int:
 COMMANDS = {
     "initdb": cmd_initdb,
     "backfill": cmd_backfill,
-    "factor": cmd_factor,
     "regime": cmd_regime,
     "daily": cmd_daily,
-    "review": cmd_review,
     "serve": cmd_serve,
     "status": cmd_status,
     "check": cmd_check,
-    "checkup": cmd_checkup,
     "export": cmd_export,
     "sector": cmd_sector,
     "limit-pool": cmd_limit_pool,
     "dump-daily": cmd_dump_daily,
-    "attribution": cmd_attribution,
-    "finance": cmd_finance,
     "sector-strength": cmd_sector_strength,
     "index": cmd_index,
     "snapshot": cmd_snapshot,
     "shadow": cmd_shadow,
-    "charts": cmd_charts,
-    "backtest": cmd_backtest,
-    "skills": cmd_skills,
 }
 
 

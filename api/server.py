@@ -550,10 +550,7 @@ def calibration(bins: int = Query(10, ge=3, le=20)) -> dict[str, Any]:
             "n": [int(v) for v in g["n"]],
         }
 
-    main = reader.query_tables(
-        "SELECT final_score AS score, ret_exit_d1c AS ret FROM backtest_scores",
-        ("backtest_scores",),
-    )
+    # 主链路分组（backtest_scores.final_score）已随主链路删除，此处只剩影子。
     where, where_params = _shadow_filters()
     shadow = reader.query(
         f"SELECT signal_score AS score, exec_d1 AS ret FROM shadow "
@@ -561,10 +558,12 @@ def calibration(bins: int = Query(10, ge=3, le=20)) -> dict[str, Any]:
         "shadow", where_params)
     return {
         "groups": [
-            calc(main, "主链路（观察池）· final_score 分位"),
-            calc(shadow, "影子信号（决策依据）· signal_score 分位"),
+            calc(shadow, "影子信号 · signal_score（缩量程度）分位"),
         ],
-        "hint": "纵轴为该分位相对全样本均值的超额收益；若评分有排序能力，曲线应自左向右单调上升。",
+        "hint": "纵轴为该分位相对全样本均值的超额收益（**可实现口径**）。"
+                "若 signal_score 有排序能力，柱形应自左向右单调上升。"
+                "⚠️ 它只是缩量程度的展示排序，**不是胜率排序** —— "
+                "请勿据此挑前几名重仓（等权分散才是它的成立前提）。",
     }
 
 

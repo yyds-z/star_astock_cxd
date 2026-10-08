@@ -25,14 +25,13 @@ ENDPOINTS = [
     ("GET", "/api/config", None),
     ("GET", "/api/market/latest", None),
     ("GET", "/api/market/history?days=30", None),
-    ("GET", "/api/recommend/latest", None),
-    ("GET", "/api/recommend/history?days=30", None),
-    ("GET", "/api/review/summary?days=30", None),
-    ("GET", "/api/review/history?days=30", None),
-    ("GET", "/api/strategies", None),
+    # /api/recommend/*、/api/review/*、/api/strategies、/api/skills* 已随主链路删除
+    ("GET", "/api/shadow/latest", None),
+    ("GET", "/api/shadow/history?days=30", None),
+    ("GET", "/api/shadow/review?days=30", None),
+    ("GET", "/api/equity", None),
+    ("GET", "/api/calibration", None),
     ("GET", "/api/sector/top?n=10", None),
-    ("GET", "/api/skills", None),
-    ("GET", "/api/skills/turtle_trade", None),
     ("GET", "/api/llm/usage", None),
     ("GET", "/api/stock/000002", None),
 ]
@@ -70,14 +69,14 @@ def main() -> int:
     concurrent_urls = [
         "/api/market/latest",
         "/api/market/history?days=120",
-        "/api/recommend/latest",
-        "/api/recommend/history?days=30",
-        "/api/review/summary?days=90",
-        "/api/review/history?days=30",
+        "/api/shadow/latest",
+        "/api/shadow/history?days=30",
+        "/api/shadow/review?days=30",
+        "/api/equity",
         "/api/status",
         "/api/stock/000002",
         "/api/sector/top?n=10",
-        "/api/skills",
+        "/api/calibration",
     ]
     from concurrent.futures import ThreadPoolExecutor
 
